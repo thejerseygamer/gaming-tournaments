@@ -9,14 +9,10 @@ type Tournament = {
   name: string;
   game: string | null;
   platform: string | null;
-  description: string | null;
-  rules: string | null;
-  start_time: string | null;
-  registration_open: boolean;
   prize_pool: number | null;
   entry_fee: number | null;
   max_players: number | null;
-  created_at: string;
+  created_at: string | null;
 };
 
 type TournamentPlayerRow = {
@@ -35,19 +31,33 @@ export default function HomePage() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    let isMounted = true;
+    let active = true;
 
     async function loadHomeData() {
+      await Promise.resolve();
+
       const { data: tournamentData, error: tournamentError } = await supabase
         .from("tournaments")
-        .select("*")
+        .select(
+          "id, name, game, platform, prize_pool, entry_fee, max_players, created_at"
+        )
         .order("created_at", { ascending: false })
-        .limit(6);
+        .limit(3);
 
-      if (!isMounted) return;
+      if (!active) {
+        return;
+      }
 
       if (tournamentError) {
-        setMessage(`Error loading tournaments: ${tournamentError.message}`);
+        setMessage(tournamentError.message);
+        setLoading(false);
+        return;
+      }
+
+      const loadedTournaments = (tournamentData || []) as Tournament[];
+      const tournamentIds = loadedTournaments.map((tournament) => tournament.id);
+
+      if (tournamentIds.length === 0) {
         setTournaments([]);
         setPlayerCounts({});
         setMatchCounts({});
@@ -55,412 +65,365 @@ export default function HomePage() {
         return;
       }
 
-      const loadedTournaments = (tournamentData || []) as Tournament[];
-
       const { data: playerData, error: playerError } = await supabase
         .from("tournament_players")
-        .select("tournament_id");
+        .select("tournament_id")
+        .in("tournament_id", tournamentIds);
 
-      if (!isMounted) return;
+      if (!active) {
+        return;
+      }
 
       if (playerError) {
-        setMessage(`Error loading player counts: ${playerError.message}`);
-        setTournaments(loadedTournaments);
-        setPlayerCounts({});
-        setMatchCounts({});
+        setMessage(playerError.message);
         setLoading(false);
         return;
       }
+
+      const playerCountMap: Record<string, number> = {};
+
+      ((playerData || []) as TournamentPlayerRow[]).forEach((row) => {
+        playerCountMap[row.tournament_id] =
+          (playerCountMap[row.tournament_id] || 0) + 1;
+      });
 
       const { data: matchData, error: matchError } = await supabase
         .from("matches")
-        .select("tournament_id");
+        .select("tournament_id")
+        .in("tournament_id", tournamentIds);
 
-      if (!isMounted) return;
+      if (!active) {
+        return;
+      }
 
       if (matchError) {
-        setMessage(`Error loading bracket status: ${matchError.message}`);
-        setTournaments(loadedTournaments);
-        setPlayerCounts({});
-        setMatchCounts({});
+        setMessage(matchError.message);
         setLoading(false);
         return;
       }
 
-      const newPlayerCounts: Record<string, number> = {};
+      const matchCountMap: Record<string, number> = {};
 
-      for (const row of (playerData || []) as TournamentPlayerRow[]) {
-        newPlayerCounts[row.tournament_id] =
-          (newPlayerCounts[row.tournament_id] || 0) + 1;
-      }
-
-      const newMatchCounts: Record<string, number> = {};
-
-      for (const row of (matchData || []) as MatchRow[]) {
-        newMatchCounts[row.tournament_id] =
-          (newMatchCounts[row.tournament_id] || 0) + 1;
-      }
+      ((matchData || []) as MatchRow[]).forEach((row) => {
+        matchCountMap[row.tournament_id] =
+          (matchCountMap[row.tournament_id] || 0) + 1;
+      });
 
       setTournaments(loadedTournaments);
-      setPlayerCounts(newPlayerCounts);
-      setMatchCounts(newMatchCounts);
+      setPlayerCounts(playerCountMap);
+      setMatchCounts(matchCountMap);
       setLoading(false);
     }
 
     loadHomeData();
 
     return () => {
-      isMounted = false;
+      active = false;
     };
   }, []);
 
-  const featuredTournament = useMemo(() => {
-    return tournaments[0] || null;
-  }, [tournaments]);
+  const totalOpenTournaments = useMemo(() => {
+    return tournaments.filter((tournament) => {
+      const joinedPlayers = playerCounts[tournament.id] || 0;
 
-  const totalPlayers = useMemo(() => {
+      if (!tournament.max_players) {
+        return true;
+      }
+
+      return joinedPlayers < tournament.max_players;
+    }).length;
+  }, [tournaments, playerCounts]);
+
+  const totalPlayersShown = useMemo(() => {
     return Object.values(playerCounts).reduce((total, count) => total + count, 0);
   }, [playerCounts]);
 
-  const lockedTournamentCount = useMemo(() => {
-    return tournaments.filter((tournament) => {
-      return (matchCounts[tournament.id] || 0) > 0;
-    }).length;
-  }, [tournaments, matchCounts]);
+  const totalMatchesShown = useMemo(() => {
+    return Object.values(matchCounts).reduce((total, count) => total + count, 0);
+  }, [matchCounts]);
 
-  const closedTournamentCount = useMemo(() => {
-    return tournaments.filter((tournament) => {
-      const isLocked = (matchCounts[tournament.id] || 0) > 0;
-      const isClosed = tournament.registration_open === false;
-
-      return isClosed && !isLocked;
-    }).length;
-  }, [tournaments, matchCounts]);
-
-  function formatDisplayDate(value: string | null) {
-    if (!value) return "Not set";
-
-    const date = new Date(value);
-
-    if (Number.isNaN(date.getTime())) return "Not set";
-
-    return date.toLocaleString();
-  }
-
-  function isTournamentFull(tournament: Tournament) {
-    const joinedPlayers = playerCounts[tournament.id] || 0;
-    const maxPlayers = tournament.max_players || 0;
-
-    return maxPlayers > 0 && joinedPlayers >= maxPlayers;
-  }
-
-  function isRegistrationLocked(tournament: Tournament) {
-    return (matchCounts[tournament.id] || 0) > 0;
-  }
-
-  function isRegistrationClosed(tournament: Tournament) {
-    return tournament.registration_open === false;
-  }
-
-  function getRegistrationLabel(tournament: Tournament) {
-    if (isRegistrationLocked(tournament)) return "Registration Locked";
-    if (isRegistrationClosed(tournament)) return "Registration Closed";
-
-    return "Registration Open";
-  }
-
-  function getRegistrationClass(tournament: Tournament) {
-    if (isRegistrationLocked(tournament)) {
-      return "border-yellow-700 bg-yellow-950/40 text-yellow-300";
+  function formatMoney(value: number | null) {
+    if (value === null) {
+      return "Not set";
     }
 
-    if (isRegistrationClosed(tournament)) {
-      return "border-red-700 bg-red-950/40 text-red-300";
+    if (value === 0) {
+      return "Free";
     }
 
-    return "border-green-700 bg-green-950/40 text-green-300";
+    return `$${value}`;
   }
 
   return (
-    <main className="min-h-screen bg-black text-white">
-      <section className="mx-auto grid max-w-6xl gap-10 px-6 py-20 md:grid-cols-2 md:items-center">
-        <div>
-          <p className="mb-4 text-sm font-bold uppercase tracking-[0.3em] text-red-500">
-            Competitive Gaming Starts Here
-          </p>
+    <main className="min-h-screen bg-zinc-950 text-white">
+      <section className="border-b border-zinc-800 bg-linear-to-b from-zinc-900 to-zinc-950 px-6 py-20">
+        <div className="mx-auto grid max-w-7xl gap-12 lg:grid-cols-[1.2fr_0.8fr] lg:items-center">
+          <div>
+            <p className="mb-4 text-sm font-black uppercase tracking-[0.3em] text-red-400">
+              BattleGrid Gaming Tournaments
+            </p>
 
-          <h1 className="mb-6 text-5xl font-black leading-tight md:text-6xl">
-            Build, join, and win gaming tournaments.
-          </h1>
+            <h1 className="max-w-4xl text-5xl font-black tracking-tight sm:text-6xl lg:text-7xl">
+              Build brackets, join tournaments, and crown champions.
+            </h1>
 
-          <p className="mb-8 text-lg text-gray-400">
-            BattleGrid gives players a place to join tournaments, track scores,
-            view brackets, and compete for prizes.
-          </p>
+            <p className="mt-6 max-w-2xl text-lg leading-8 text-zinc-400">
+              BattleGrid gives Madden and competitive gaming players a place to
+              join events, track brackets, report winners, and follow tournament
+              progress from one clean dashboard.
+            </p>
 
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <Link
-              href="/tournaments"
-              className="rounded-lg bg-white px-6 py-4 text-center font-bold text-black hover:bg-gray-200"
-            >
-              Browse Tournaments
-            </Link>
-
-            <Link
-              href="/signup"
-              className="rounded-lg border border-gray-700 px-6 py-4 text-center font-bold text-white hover:bg-gray-900"
-            >
-              Create Account
-            </Link>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-gray-800 bg-gray-950 p-6">
-          <p className="mb-3 text-sm font-bold uppercase tracking-[0.25em] text-red-500">
-            Featured Tournament
-          </p>
-
-          {loading ? (
-            <div className="rounded-xl border border-gray-800 bg-black p-5">
-              <p className="text-gray-400">Loading featured tournament...</p>
-            </div>
-          ) : featuredTournament ? (
-            <>
-              <div className="mb-4 rounded-xl border border-gray-800 bg-black p-5">
-                <h2 className="text-2xl font-bold">
-                  {featuredTournament.name}
-                </h2>
-
-                <p className="mt-2 text-gray-400">
-                  {featuredTournament.game || "Game not set"} •{" "}
-                  {featuredTournament.platform || "Platform not set"}
-                </p>
-
-                <p className="mt-2 text-sm text-gray-500">
-                  Start Time: {formatDisplayDate(featuredTournament.start_time)}
-                </p>
-
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <span
-                    className={`rounded-full border px-3 py-1 text-xs font-bold ${getRegistrationClass(
-                      featuredTournament
-                    )}`}
-                  >
-                    {getRegistrationLabel(featuredTournament)}
-                  </span>
-
-                  <span
-                    className={`rounded-full border px-3 py-1 text-xs font-bold ${
-                      isTournamentFull(featuredTournament)
-                        ? "border-red-700 bg-red-950/40 text-red-300"
-                        : "border-gray-700 bg-black text-gray-300"
-                    }`}
-                  >
-                    {isTournamentFull(featuredTournament)
-                      ? "Full"
-                      : "Spots Open"}
-                  </span>
-                </div>
-              </div>
-
-              <div className="mb-5 grid gap-4 sm:grid-cols-3">
-                <div className="rounded-xl border border-gray-800 bg-black p-4">
-                  <p className="text-sm text-gray-500">Prize Pool</p>
-                  <p className="text-2xl font-bold">
-                    ${featuredTournament.prize_pool || 0}
-                  </p>
-                </div>
-
-                <div className="rounded-xl border border-gray-800 bg-black p-4">
-                  <p className="text-sm text-gray-500">Players</p>
-                  <p className="text-2xl font-bold">
-                    {playerCounts[featuredTournament.id] || 0}
-                    {featuredTournament.max_players
-                      ? ` / ${featuredTournament.max_players}`
-                      : ""}
-                  </p>
-                </div>
-
-                <div className="rounded-xl border border-gray-800 bg-black p-4">
-                  <p className="text-sm text-gray-500">Entry</p>
-                  <p className="text-2xl font-bold">
-                    ${featuredTournament.entry_fee || 0}
-                  </p>
-                </div>
-              </div>
+            <div className="mt-8 flex flex-col gap-4 sm:flex-row">
+              <Link
+                href="/tournaments"
+                className="rounded-xl bg-red-600 px-6 py-4 text-center font-bold text-white hover:bg-red-700"
+              >
+                Browse Tournaments
+              </Link>
 
               <Link
-                href={`/tournaments/${featuredTournament.id}`}
-                className="block rounded-lg bg-white px-5 py-3 text-center font-bold text-black hover:bg-gray-200"
+                href="/signup"
+                className="rounded-xl border border-zinc-700 px-6 py-4 text-center font-bold text-white hover:bg-zinc-800"
               >
-                View Featured Tournament
+                Create Player Account
               </Link>
-            </>
-          ) : (
-            <div className="rounded-xl border border-gray-800 bg-black p-5">
-              <h2 className="mb-2 text-2xl font-bold">No tournaments yet</h2>
+            </div>
+          </div>
 
-              <p className="mb-4 text-gray-400">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-5">
+              <p className="text-sm font-bold uppercase tracking-widest text-red-300">
+                Live Platform Snapshot
+              </p>
+
+              <div className="mt-6 grid gap-4">
+                <div className="rounded-xl bg-zinc-950 p-5">
+                  <p className="text-sm text-zinc-500">Featured Tournaments</p>
+                  <p className="mt-1 text-4xl font-black">
+                    {loading ? "..." : tournaments.length}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="rounded-xl bg-zinc-950 p-5">
+                    <p className="text-sm text-zinc-500">Open Events</p>
+                    <p className="mt-1 text-3xl font-black">
+                      {loading ? "..." : totalOpenTournaments}
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl bg-zinc-950 p-5">
+                    <p className="text-sm text-zinc-500">Players</p>
+                    <p className="mt-1 text-3xl font-black">
+                      {loading ? "..." : totalPlayersShown}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-zinc-950 p-5">
+                  <p className="text-sm text-zinc-500">Generated Matches</p>
+                  <p className="mt-1 text-3xl font-black">
+                    {loading ? "..." : totalMatchesShown}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="px-6 py-16">
+        <div className="mx-auto max-w-7xl">
+          <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="mb-2 text-sm font-black uppercase tracking-widest text-red-400">
+                Featured Events
+              </p>
+
+              <h2 className="text-4xl font-black">Latest Tournaments</h2>
+
+              <p className="mt-3 max-w-2xl text-zinc-400">
+                Jump into available events, check player counts, and follow
+                brackets once they are generated.
+              </p>
+            </div>
+
+            <Link
+              href="/tournaments"
+              className="rounded-lg border border-zinc-700 px-5 py-3 text-center font-semibold text-white hover:bg-zinc-800"
+            >
+              View All Tournaments
+            </Link>
+          </div>
+
+          {message && (
+            <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-5 text-red-300">
+              {message}
+            </div>
+          )}
+
+          {!message && loading && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-zinc-400">
+              Loading featured tournaments...
+            </div>
+          )}
+
+          {!message && !loading && tournaments.length === 0 && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
+              <h3 className="text-2xl font-bold">No tournaments yet</h3>
+
+              <p className="mt-2 text-zinc-400">
                 Create your first tournament from the admin dashboard.
               </p>
 
               <Link
                 href="/admin"
-                className="inline-block rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200"
+                className="mt-6 inline-block rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700"
               >
                 Create Tournament
               </Link>
             </div>
           )}
-        </div>
-      </section>
 
-      <section className="mx-auto max-w-6xl px-6 pb-12">
-        <div className="grid gap-5 md:grid-cols-4">
-          <div className="rounded-xl border border-gray-800 bg-gray-950 p-6">
-            <p className="text-sm text-gray-500">Latest Tournaments</p>
-            <p className="mt-2 text-4xl font-black">{tournaments.length}</p>
-          </div>
+          {!message && !loading && tournaments.length > 0 && (
+            <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+              {tournaments.map((tournament) => {
+                const joinedPlayers = playerCounts[tournament.id] || 0;
+                const totalMatches = matchCounts[tournament.id] || 0;
+                const maxPlayers = tournament.max_players;
+                const isFull =
+                  maxPlayers !== null &&
+                  maxPlayers !== undefined &&
+                  joinedPlayers >= maxPlayers;
 
-          <div className="rounded-xl border border-gray-800 bg-gray-950 p-6">
-            <p className="text-sm text-gray-500">Joined Players</p>
-            <p className="mt-2 text-4xl font-black">{totalPlayers}</p>
-          </div>
-
-          <div className="rounded-xl border border-gray-800 bg-gray-950 p-6">
-            <p className="text-sm text-gray-500">Closed Registration</p>
-            <p className="mt-2 text-4xl font-black">{closedTournamentCount}</p>
-          </div>
-
-          <div className="rounded-xl border border-gray-800 bg-gray-950 p-6">
-            <p className="text-sm text-gray-500">Locked Brackets</p>
-            <p className="mt-2 text-4xl font-black">{lockedTournamentCount}</p>
-          </div>
-        </div>
-      </section>
-
-      <section className="mx-auto max-w-6xl px-6 pb-20">
-        <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h2 className="text-3xl font-black">Latest Tournaments</h2>
-
-            <p className="mt-2 text-gray-400">
-              Jump into one of the newest BattleGrid events while registration
-              is open.
-            </p>
-          </div>
-
-          <Link
-            href="/tournaments"
-            className="rounded-lg border border-gray-700 px-5 py-3 text-center font-bold text-white hover:bg-gray-900"
-          >
-            View All
-          </Link>
-        </div>
-
-        {message && (
-          <p className="mb-6 rounded-lg border border-red-900 bg-red-950/40 p-4 text-sm text-red-200">
-            {message}
-          </p>
-        )}
-
-        {loading ? (
-          <p className="rounded-xl border border-gray-800 bg-gray-950 p-6 text-gray-400">
-            Loading tournaments...
-          </p>
-        ) : tournaments.length === 0 ? (
-          <div className="rounded-xl border border-gray-800 bg-gray-950 p-6">
-            <h3 className="mb-2 text-2xl font-bold">No tournaments yet</h3>
-
-            <p className="text-gray-400">
-              Once tournaments are created, they will appear here.
-            </p>
-          </div>
-        ) : (
-          <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-            {tournaments.map((tournament) => {
-              const joinedPlayers = playerCounts[tournament.id] || 0;
-              const maxPlayers = tournament.max_players || 0;
-              const spotsLeft =
-                maxPlayers > 0
-                  ? Math.max(maxPlayers - joinedPlayers, 0)
-                  : null;
-
-              const isFull = isTournamentFull(tournament);
-
-              return (
-                <div
-                  key={tournament.id}
-                  className="rounded-xl border border-gray-800 bg-gray-950 p-5"
-                >
-                  <div className="mb-4">
-                    <h3 className="text-xl font-bold">{tournament.name}</h3>
-
-                    <p className="mt-1 text-sm text-gray-500">
-                      {tournament.game || "Game not set"} •{" "}
-                      {tournament.platform || "Platform not set"}
-                    </p>
-                  </div>
-
-                  <div className="mb-4 flex flex-wrap gap-2">
-                    <span
-                      className={`rounded-full border px-3 py-1 text-xs font-bold ${getRegistrationClass(
-                        tournament
-                      )}`}
-                    >
-                      {getRegistrationLabel(tournament)}
-                    </span>
-
-                    <span
-                      className={`rounded-full border px-3 py-1 text-xs font-bold ${
-                        isFull
-                          ? "border-red-700 bg-red-950/40 text-red-300"
-                          : "border-gray-700 bg-black text-gray-300"
-                      }`}
-                    >
-                      {isFull ? "Full" : "Spots Open"}
-                    </span>
-                  </div>
-
-                  <div className="mb-5 grid gap-2 text-sm text-gray-300">
-                    <p>
-                      <span className="text-gray-500">Start Time:</span>{" "}
-                      {formatDisplayDate(tournament.start_time)}
-                    </p>
-
-                    <p>
-                      <span className="text-gray-500">Prize Pool:</span> $
-                      {tournament.prize_pool || 0}
-                    </p>
-
-                    <p>
-                      <span className="text-gray-500">Entry Fee:</span> $
-                      {tournament.entry_fee || 0}
-                    </p>
-
-                    <p>
-                      <span className="text-gray-500">Players:</span>{" "}
-                      {joinedPlayers}
-                      {maxPlayers > 0 ? ` / ${maxPlayers}` : ""}
-                    </p>
-
-                    <p>
-                      <span className="text-gray-500">Spots Left:</span>{" "}
-                      {spotsLeft === null ? "Unlimited" : spotsLeft}
-                    </p>
-                  </div>
-
-                  <Link
-                    href={`/tournaments/${tournament.id}`}
-                    className="block rounded-lg bg-white px-4 py-3 text-center font-bold text-black hover:bg-gray-200"
+                return (
+                  <article
+                    key={tournament.id}
+                    className="flex flex-col rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-lg"
                   >
-                    View Tournament
-                  </Link>
-                </div>
-              );
-            })}
+                    <div className="mb-5 flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="text-2xl font-black">
+                          {tournament.name}
+                        </h3>
+
+                        <p className="mt-2 text-sm text-zinc-400">
+                          {tournament.game || "Game not set"} •{" "}
+                          {tournament.platform || "Platform not set"}
+                        </p>
+                      </div>
+
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-bold ${
+                          isFull
+                            ? "bg-red-500/10 text-red-300"
+                            : "bg-green-500/10 text-green-300"
+                        }`}
+                      >
+                        {isFull ? "Full" : "Open"}
+                      </span>
+                    </div>
+
+                    <div className="grid gap-3 text-sm">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="rounded-lg bg-zinc-950 p-4">
+                          <p className="text-zinc-500">Prize</p>
+                          <p className="mt-1 font-bold">
+                            {formatMoney(tournament.prize_pool)}
+                          </p>
+                        </div>
+
+                        <div className="rounded-lg bg-zinc-950 p-4">
+                          <p className="text-zinc-500">Entry</p>
+                          <p className="mt-1 font-bold">
+                            {formatMoney(tournament.entry_fee)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="rounded-lg bg-zinc-950 p-4">
+                          <p className="text-zinc-500">Players</p>
+                          <p className="mt-1 font-bold">
+                            {joinedPlayers}
+                            {maxPlayers ? ` / ${maxPlayers}` : ""}
+                          </p>
+                        </div>
+
+                        <div className="rounded-lg bg-zinc-950 p-4">
+                          <p className="text-zinc-500">Matches</p>
+                          <p className="mt-1 font-bold">{totalMatches}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-6 flex flex-col gap-3">
+                      <Link
+                        href={`/tournaments/${tournament.id}`}
+                        className="rounded-lg bg-red-600 px-4 py-3 text-center font-bold text-white hover:bg-red-700"
+                      >
+                        View Details / Join
+                      </Link>
+
+                      <Link
+                        href="/brackets"
+                        className="rounded-lg border border-zinc-700 px-4 py-3 text-center font-bold text-white hover:bg-zinc-800"
+                      >
+                        View Brackets
+                      </Link>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="border-t border-zinc-800 px-6 py-16">
+        <div className="mx-auto max-w-7xl">
+          <div className="mb-8">
+            <p className="mb-2 text-sm font-black uppercase tracking-widest text-red-400">
+              How It Works
+            </p>
+
+            <h2 className="text-4xl font-black">Run tournaments in 4 steps</h2>
           </div>
-        )}
+
+          <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+              <p className="text-4xl font-black text-red-500">01</p>
+              <h3 className="mt-4 text-xl font-bold">Create Profile</h3>
+              <p className="mt-2 text-zinc-400">
+                Players add a gamer tag, platform, and favorite team.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+              <p className="text-4xl font-black text-red-500">02</p>
+              <h3 className="mt-4 text-xl font-bold">Join Tournament</h3>
+              <p className="mt-2 text-zinc-400">
+                Players join open events and track them from My Tournaments.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+              <p className="text-4xl font-black text-red-500">03</p>
+              <h3 className="mt-4 text-xl font-bold">Generate Bracket</h3>
+              <p className="mt-2 text-zinc-400">
+                Admins generate matchups and save winners after games finish.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+              <p className="text-4xl font-black text-red-500">04</p>
+              <h3 className="mt-4 text-xl font-bold">Crown Champion</h3>
+              <p className="mt-2 text-zinc-400">
+                Winners advance until one final champion is shown on brackets.
+              </p>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
   );

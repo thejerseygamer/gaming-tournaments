@@ -1,10 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabase";
-import { checkIsAdmin } from "../../lib/admin";
+
+type Match = {
+  id: string;
+  tournament_id: string;
+  round: number | null;
+  match_number: number | null;
+  player1_id: string | null;
+  player2_id: string | null;
+  winner_id: string | null;
+};
 
 type Tournament = {
   id: string;
@@ -13,551 +21,834 @@ type Tournament = {
   platform: string | null;
 };
 
-type Match = {
-  id: string;
-  tournament_id: string;
-  round: number;
-  match_number: number;
-  player1_id: string | null;
-  player2_id: string | null;
-  winner_id: string | null;
-  player1_score: number | null;
-  player2_score: number | null;
-  score_submitted_by: string | null;
-  score_submitted_at: string | null;
-  status: string | null;
-};
-
-type PlayerProfile = {
+type Profile = {
   id: string;
   gamer_tag: string | null;
   platform: string | null;
   favorite_team: string | null;
 };
 
-type WinnerInputs = Record<string, string>;
+type MatchReport = {
+  id: string;
+  match_id: string;
+  tournament_id: string;
+  submitted_by: string;
+  player1_score: number;
+  player2_score: number;
+  reported_winner_id: string;
+  notes: string | null;
+  status: "pending" | "approved" | "rejected";
+  created_at: string | null;
+};
 
-export default function AdminScoreReviewsPage() {
-  const router = useRouter();
+type ReviewFilter = "all" | "pending" | "approved" | "rejected";
 
-  const [checkingAdmin, setCheckingAdmin] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
+type NewMatch = {
+  tournament_id: string;
+  round: number;
+  match_number: number;
+  player1_id: string | null;
+  player2_id: string | null;
+  winner_id: string | null;
+};
 
-  const [matches, setMatches] = useState<Match[]>([]);
+export default function AdminReviewsPage() {
+  const [reports, setReports] = useState<MatchReport[]>([]);
+  const [matches, setMatches] = useState<Record<string, Match>>({});
   const [tournaments, setTournaments] = useState<Record<string, Tournament>>({});
-  const [profiles, setProfiles] = useState<Record<string, PlayerProfile>>({});
-  const [winnerInputs, setWinnerInputs] = useState<WinnerInputs>({});
+  const [profiles, setProfiles] = useState<Record<string, Profile>>({});
+  const [searchText, setSearchText] = useState("");
+  const [filter, setFilter] = useState<ReviewFilter>("pending");
 
   const [loading, setLoading] = useState(true);
-  const [savingMatchId, setSavingMatchId] = useState("");
+  const [reviewingReportId, setReviewingReportId] = useState<string | null>(
+    null
+  );
   const [message, setMessage] = useState("");
 
+  const getPlayerName = useCallback(
+    (playerId: string | null) => {
+      if (!playerId) {
+        return "Waiting for player";
+      }
+
+      const profile = profiles[playerId];
+
+      if (profile?.gamer_tag) {
+        return profile.gamer_tag;
+      }
+
+      return "Unknown Player";
+    },
+    [profiles]
+  );
+
+  const getPlayerPlatform = useCallback(
+    (playerId: string | null) => {
+      if (!playerId) {
+        return "Platform not set";
+      }
+
+      return profiles[playerId]?.platform || "Platform not set";
+    },
+    [profiles]
+  );
+
+  const getTournamentName = useCallback(
+    (tournamentId: string) => {
+      return tournaments[tournamentId]?.name || "Unknown Tournament";
+    },
+    [tournaments]
+  );
+
+  const getTournamentGame = useCallback(
+    (tournamentId: string) => {
+      return tournaments[tournamentId]?.game || "Game not set";
+    },
+    [tournaments]
+  );
+
+  const getTournamentPlatform = useCallback(
+    (tournamentId: string) => {
+      return tournaments[tournamentId]?.platform || "Platform not set";
+    },
+    [tournaments]
+  );
+
   useEffect(() => {
-    let isMounted = true;
+    let active = true;
 
-    async function verifyAndLoad() {
-      const adminCheck = await checkIsAdmin();
+    async function loadReviews() {
+      await Promise.resolve();
 
-      if (!isMounted) return;
+      const { data: reportData, error: reportError } = await supabase
+        .from("match_reports")
+        .select(
+          "id, match_id, tournament_id, submitted_by, player1_score, player2_score, reported_winner_id, notes, status, created_at"
+        )
+        .order("created_at", { ascending: false });
 
-      if (!adminCheck.user) {
-        router.push("/login");
+      if (!active) {
         return;
       }
 
-      if (!adminCheck.isAdmin) {
-        router.push("/tournaments");
+      if (reportError) {
+        setMessage(reportError.message);
+        setLoading(false);
         return;
       }
 
-      setIsAdmin(true);
-      setCheckingAdmin(false);
+      const loadedReports = (reportData || []) as MatchReport[];
 
-      await loadReviews();
+      if (loadedReports.length === 0) {
+        setReports([]);
+        setMatches({});
+        setTournaments({});
+        setProfiles({});
+        setLoading(false);
+        return;
+      }
+
+      const matchIds = Array.from(
+        new Set(loadedReports.map((report) => report.match_id))
+      );
+
+      const tournamentIds = Array.from(
+        new Set(loadedReports.map((report) => report.tournament_id))
+      );
+
+      const profileIds = Array.from(
+        new Set(
+          loadedReports
+            .flatMap((report) => [
+              report.submitted_by,
+              report.reported_winner_id,
+            ])
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+
+      const matchMap: Record<string, Match> = {};
+      const tournamentMap: Record<string, Tournament> = {};
+      const profileMap: Record<string, Profile> = {};
+
+      if (matchIds.length > 0) {
+        const { data: matchData, error: matchError } = await supabase
+          .from("matches")
+          .select(
+            "id, tournament_id, round, match_number, player1_id, player2_id, winner_id"
+          )
+          .in("id", matchIds);
+
+        if (!active) {
+          return;
+        }
+
+        if (matchError) {
+          setMessage(matchError.message);
+          setLoading(false);
+          return;
+        }
+
+        ((matchData || []) as Match[]).forEach((match) => {
+          matchMap[match.id] = match;
+
+          if (match.player1_id) {
+            profileIds.push(match.player1_id);
+          }
+
+          if (match.player2_id) {
+            profileIds.push(match.player2_id);
+          }
+
+          if (match.winner_id) {
+            profileIds.push(match.winner_id);
+          }
+        });
+      }
+
+      if (tournamentIds.length > 0) {
+        const { data: tournamentData, error: tournamentError } = await supabase
+          .from("tournaments")
+          .select("id, name, game, platform")
+          .in("id", tournamentIds);
+
+        if (!active) {
+          return;
+        }
+
+        if (tournamentError) {
+          setMessage(tournamentError.message);
+          setLoading(false);
+          return;
+        }
+
+        ((tournamentData || []) as Tournament[]).forEach((tournament) => {
+          tournamentMap[tournament.id] = tournament;
+        });
+      }
+
+      const uniqueProfileIds = Array.from(new Set(profileIds));
+
+      if (uniqueProfileIds.length > 0) {
+        const { data: profileData, error: profileError } = await supabase
+          .from("profiles")
+          .select("id, gamer_tag, platform, favorite_team")
+          .in("id", uniqueProfileIds);
+
+        if (!active) {
+          return;
+        }
+
+        if (profileError) {
+          setMessage(profileError.message);
+          setLoading(false);
+          return;
+        }
+
+        ((profileData || []) as Profile[]).forEach((profile) => {
+          profileMap[profile.id] = profile;
+        });
+      }
+
+      setReports(loadedReports);
+      setMatches(matchMap);
+      setTournaments(tournamentMap);
+      setProfiles(profileMap);
+      setLoading(false);
     }
 
-    verifyAndLoad();
+    loadReviews();
 
     return () => {
-      isMounted = false;
+      active = false;
     };
-  }, [router]);
+  }, []);
 
-  async function loadReviews() {
-    setLoading(true);
-    setMessage("");
+  const totalPending = useMemo(() => {
+    return reports.filter((report) => report.status === "pending").length;
+  }, [reports]);
 
-    const { data: matchData, error: matchError } = await supabase
-      .from("matches")
-      .select("*")
-      .not("score_submitted_by", "is", null)
-      .neq("status", "completed")
-      .order("score_submitted_at", { ascending: true });
+  const totalApproved = useMemo(() => {
+    return reports.filter((report) => report.status === "approved").length;
+  }, [reports]);
 
-    if (matchError) {
-      setMessage(`Error loading score reviews: ${matchError.message}`);
-      setMatches([]);
-      setLoading(false);
+  const totalRejected = useMemo(() => {
+    return reports.filter((report) => report.status === "rejected").length;
+  }, [reports]);
+
+  const totalTournamentsWithReports = useMemo(() => {
+    return new Set(reports.map((report) => report.tournament_id)).size;
+  }, [reports]);
+
+  const filteredReports = useMemo(() => {
+    const normalizedSearch = searchText.trim().toLowerCase();
+
+    return reports.filter((report) => {
+      if (filter !== "all" && report.status !== filter) {
+        return false;
+      }
+
+      if (!normalizedSearch) {
+        return true;
+      }
+
+      const match = matches[report.match_id];
+      const tournamentName = getTournamentName(report.tournament_id).toLowerCase();
+      const game = getTournamentGame(report.tournament_id).toLowerCase();
+      const platform = getTournamentPlatform(report.tournament_id).toLowerCase();
+      const submittedBy = getPlayerName(report.submitted_by).toLowerCase();
+      const winnerName = getPlayerName(report.reported_winner_id).toLowerCase();
+      const player1Name = getPlayerName(match?.player1_id || null).toLowerCase();
+      const player2Name = getPlayerName(match?.player2_id || null).toLowerCase();
+
+      return (
+        tournamentName.includes(normalizedSearch) ||
+        game.includes(normalizedSearch) ||
+        platform.includes(normalizedSearch) ||
+        submittedBy.includes(normalizedSearch) ||
+        winnerName.includes(normalizedSearch) ||
+        player1Name.includes(normalizedSearch) ||
+        player2Name.includes(normalizedSearch)
+      );
+    });
+  }, [
+    reports,
+    filter,
+    searchText,
+    matches,
+    getTournamentName,
+    getTournamentGame,
+    getTournamentPlatform,
+    getPlayerName,
+  ]);
+
+  function isFinalMatch(match: Match, tournamentMatches: Match[]) {
+    const currentRound = match.round || 1;
+
+    const matchesInCurrentRound = tournamentMatches.filter(
+      (currentMatch) => (currentMatch.round || 1) === currentRound
+    );
+
+    return matchesInCurrentRound.length <= 1;
+  }
+
+  async function advanceWinnerToNextRound(match: Match, winnerId: string) {
+    const { data: tournamentMatchData, error: tournamentMatchError } =
+      await supabase
+        .from("matches")
+        .select(
+          "id, tournament_id, round, match_number, player1_id, player2_id, winner_id"
+        )
+        .eq("tournament_id", match.tournament_id);
+
+    if (tournamentMatchError) {
+      throw new Error(tournamentMatchError.message);
+    }
+
+    const tournamentMatches = (tournamentMatchData || []) as Match[];
+
+    if (isFinalMatch(match, tournamentMatches)) {
       return;
     }
 
-    const loadedMatches = (matchData || []) as Match[];
+    const currentRound = match.round || 1;
+    const currentMatchNumber = match.match_number || 1;
+    const nextRound = currentRound + 1;
+    const nextMatchNumber = Math.ceil(currentMatchNumber / 2);
 
-    setMatches(loadedMatches);
+    const winnerSlot =
+      currentMatchNumber % 2 === 1 ? "player1_id" : "player2_id";
 
-    const newWinnerInputs: WinnerInputs = {};
-
-    for (const match of loadedMatches) {
-      newWinnerInputs[match.id] = match.winner_id || "";
-    }
-
-    setWinnerInputs(newWinnerInputs);
-
-    const tournamentIds = Array.from(
-      new Set(loadedMatches.map((match) => match.tournament_id))
+    const existingNextMatch = tournamentMatches.find(
+      (currentMatch) =>
+        (currentMatch.round || 1) === nextRound &&
+        (currentMatch.match_number || 1) === nextMatchNumber
     );
 
-    const playerIds = Array.from(
-      new Set(
-        loadedMatches
-          .flatMap((match) => [
-            match.player1_id,
-            match.player2_id,
-            match.score_submitted_by,
-            match.winner_id,
-          ])
-          .filter((id): id is string => Boolean(id))
+    if (existingNextMatch) {
+      const { error } = await supabase
+        .from("matches")
+        .update({
+          [winnerSlot]: winnerId,
+          winner_id: null,
+        })
+        .eq("id", existingNextMatch.id);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      return;
+    }
+
+    const nextMatch: NewMatch = {
+      tournament_id: match.tournament_id,
+      round: nextRound,
+      match_number: nextMatchNumber,
+      player1_id: winnerSlot === "player1_id" ? winnerId : null,
+      player2_id: winnerSlot === "player2_id" ? winnerId : null,
+      winner_id: null,
+    };
+
+    const { error } = await supabase.from("matches").insert(nextMatch);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+  }
+
+  async function approveReport(report: MatchReport) {
+    const match = matches[report.match_id];
+
+    if (!match) {
+      setMessage("Match not found for this report.");
+      return;
+    }
+
+    if (
+      report.reported_winner_id !== match.player1_id &&
+      report.reported_winner_id !== match.player2_id
+    ) {
+      setMessage("Reported winner must be one of the players in the match.");
+      return;
+    }
+
+    setReviewingReportId(report.id);
+    setMessage("");
+
+    const { error: updateMatchError } = await supabase
+      .from("matches")
+      .update({
+        winner_id: report.reported_winner_id,
+      })
+      .eq("id", report.match_id);
+
+    if (updateMatchError) {
+      setMessage(updateMatchError.message);
+      setReviewingReportId(null);
+      return;
+    }
+
+    const { error: approveReportError } = await supabase
+      .from("match_reports")
+      .update({
+        status: "approved",
+      })
+      .eq("id", report.id);
+
+    if (approveReportError) {
+      setMessage(approveReportError.message);
+      setReviewingReportId(null);
+      return;
+    }
+
+    const { error: rejectOtherReportsError } = await supabase
+      .from("match_reports")
+      .update({
+        status: "rejected",
+      })
+      .eq("match_id", report.match_id)
+      .neq("id", report.id)
+      .eq("status", "pending");
+
+    if (rejectOtherReportsError) {
+      setMessage(rejectOtherReportsError.message);
+      setReviewingReportId(null);
+      return;
+    }
+
+    try {
+      await advanceWinnerToNextRound(match, report.reported_winner_id);
+    } catch (advanceError) {
+      setMessage(
+        advanceError instanceof Error
+          ? advanceError.message
+          : "Report approved, but advancing the winner failed."
+      );
+      setReviewingReportId(null);
+      return;
+    }
+
+    setReports((currentReports) =>
+      currentReports.map((currentReport) => {
+        if (currentReport.id === report.id) {
+          return {
+            ...currentReport,
+            status: "approved",
+          };
+        }
+
+        if (
+          currentReport.match_id === report.match_id &&
+          currentReport.status === "pending"
+        ) {
+          return {
+            ...currentReport,
+            status: "rejected",
+          };
+        }
+
+        return currentReport;
+      })
+    );
+
+    setMatches((currentMatches) => ({
+      ...currentMatches,
+      [match.id]: {
+        ...match,
+        winner_id: report.reported_winner_id,
+      },
+    }));
+
+    setMessage(
+      `Approved report. Winner saved: ${getPlayerName(
+        report.reported_winner_id
+      )}`
+    );
+    setReviewingReportId(null);
+  }
+
+  async function rejectReport(report: MatchReport) {
+    setReviewingReportId(report.id);
+    setMessage("");
+
+    const { error } = await supabase
+      .from("match_reports")
+      .update({
+        status: "rejected",
+      })
+      .eq("id", report.id);
+
+    if (error) {
+      setMessage(error.message);
+      setReviewingReportId(null);
+      return;
+    }
+
+    setReports((currentReports) =>
+      currentReports.map((currentReport) =>
+        currentReport.id === report.id
+          ? {
+              ...currentReport,
+              status: "rejected",
+            }
+          : currentReport
       )
     );
 
-    if (tournamentIds.length > 0) {
-      const { data: tournamentData, error: tournamentError } = await supabase
-        .from("tournaments")
-        .select("id, name, game, platform")
-        .in("id", tournamentIds);
-
-      if (tournamentError) {
-        setMessage(`Error loading tournaments: ${tournamentError.message}`);
-      } else {
-        const tournamentMap = ((tournamentData || []) as Tournament[]).reduce(
-          (acc, tournament) => {
-            acc[tournament.id] = tournament;
-            return acc;
-          },
-          {} as Record<string, Tournament>
-        );
-
-        setTournaments(tournamentMap);
-      }
-    } else {
-      setTournaments({});
-    }
-
-    if (playerIds.length > 0) {
-      const { data: profileData, error: profileError } = await supabase
-        .from("profiles")
-        .select("id, gamer_tag, platform, favorite_team")
-        .in("id", playerIds);
-
-      if (profileError) {
-        setMessage(`Error loading profiles: ${profileError.message}`);
-      } else {
-        const profileMap = ((profileData || []) as PlayerProfile[]).reduce(
-          (acc, profile) => {
-            acc[profile.id] = profile;
-            return acc;
-          },
-          {} as Record<string, PlayerProfile>
-        );
-
-        setProfiles(profileMap);
-      }
-    } else {
-      setProfiles({});
-    }
-
-    setLoading(false);
+    setMessage("Report rejected.");
+    setReviewingReportId(null);
   }
 
-  const reviewCount = useMemo(() => {
-    return matches.length;
-  }, [matches]);
-
-  function playerName(playerId: string | null) {
-    if (!playerId) return "TBD";
-
-    return profiles[playerId]?.gamer_tag || "Unnamed Player";
-  }
-
-  function formatDisplayDate(value: string | null) {
-    if (!value) return "Not set";
-
-    const date = new Date(value);
-
-    if (Number.isNaN(date.getTime())) return "Not set";
-
-    return date.toLocaleString();
-  }
-
-  function getNextMatchNumber(matchNumber: number) {
-    return Math.ceil(matchNumber / 2);
-  }
-
-  function shouldPlaceWinnerInPlayer1(matchNumber: number) {
-    return matchNumber % 2 === 1;
-  }
-
-  function updateWinnerInput(matchId: string, winnerId: string) {
-    setWinnerInputs((current) => ({
-      ...current,
-      [matchId]: winnerId,
-    }));
-  }
-
-  async function verifyAdminAction() {
-    const adminCheck = await checkIsAdmin();
-
-    if (!adminCheck.user) {
-      setMessage("You must be logged in as an admin.");
-      router.push("/login");
-      return false;
-    }
-
-    if (!adminCheck.isAdmin) {
-      setMessage("You are not allowed to review scores.");
-      router.push("/tournaments");
-      return false;
-    }
-
-    return true;
-  }
-
-  async function approveResult(match: Match) {
-    const winnerId = winnerInputs[match.id];
-
-    if (!winnerId) {
-      setMessage("Choose the official winner before approving.");
-      return;
-    }
-
-    if (winnerId !== match.player1_id && winnerId !== match.player2_id) {
-      setMessage("Winner must be one of the players in this match.");
-      return;
-    }
-
-    if (!match.player1_id || !match.player2_id) {
-      setMessage("Both players must be assigned before approving.");
-      return;
-    }
-
-    setSavingMatchId(match.id);
-    setMessage("");
-
-    const allowed = await verifyAdminAction();
-
-    if (!allowed) {
-      setSavingMatchId("");
-      return;
-    }
-
-    const { error: updateCurrentError } = await supabase
-      .from("matches")
-      .update({
-        winner_id: winnerId,
-        status: "completed",
-      })
-      .eq("id", match.id);
-
-    if (updateCurrentError) {
-      setMessage(`Error approving result: ${updateCurrentError.message}`);
-      setSavingMatchId("");
-      return;
-    }
-
-    const { data: nextMatchData, error: nextMatchError } = await supabase
-      .from("matches")
-      .select("*")
-      .eq("tournament_id", match.tournament_id)
-      .eq("round", match.round + 1)
-      .eq("match_number", getNextMatchNumber(match.match_number))
-      .maybeSingle();
-
-    if (nextMatchError) {
-      setMessage(
-        `Result approved, but next match could not be checked: ${nextMatchError.message}`
-      );
-      await loadReviews();
-      setSavingMatchId("");
-      return;
-    }
-
-    const nextMatch = nextMatchData as Match | null;
-
-    if (nextMatch) {
-      const nextMatchUpdate = shouldPlaceWinnerInPlayer1(match.match_number)
-        ? { player1_id: winnerId }
-        : { player2_id: winnerId };
-
-      const { error: advanceError } = await supabase
-        .from("matches")
-        .update(nextMatchUpdate)
-        .eq("id", nextMatch.id);
-
-      if (advanceError) {
-        setMessage(
-          `Result approved, but winner did not advance: ${advanceError.message}`
-        );
-        await loadReviews();
-        setSavingMatchId("");
-        return;
-      }
-
-      setMessage("Score approved. Winner advanced to the next round.");
-    } else {
-      setMessage(`Final score approved. Champion: ${playerName(winnerId)}.`);
-    }
-
-    await loadReviews();
-    setSavingMatchId("");
-  }
-
-  async function dismissSubmission(match: Match) {
-    const confirmed = window.confirm(
-      "Dismiss this score submission? This clears the submitted score and lets the player submit again."
-    );
-
-    if (!confirmed) return;
-
-    setSavingMatchId(match.id);
-    setMessage("");
-
-    const allowed = await verifyAdminAction();
-
-    if (!allowed) {
-      setSavingMatchId("");
-      return;
-    }
-
-    const { error } = await supabase
-      .from("matches")
-      .update({
-        player1_score: null,
-        player2_score: null,
-        score_submitted_by: null,
-        score_submitted_at: null,
-        status: "pending",
-      })
-      .eq("id", match.id);
-
-    if (error) {
-      setMessage(`Error dismissing submission: ${error.message}`);
-      setSavingMatchId("");
-      return;
-    }
-
-    setMessage("Score submission dismissed.");
-    await loadReviews();
-    setSavingMatchId("");
-  }
-
-  if (checkingAdmin) {
+  if (loading) {
     return (
-      <main className="min-h-screen bg-black p-6 text-white">
-        <div className="mx-auto max-w-5xl">
-          <p className="rounded-xl border border-gray-800 bg-gray-950 p-6 text-gray-400">
-            Checking admin access...
-          </p>
-        </div>
-      </main>
-    );
-  }
-
-  if (!isAdmin) {
-    return (
-      <main className="min-h-screen bg-black p-6 text-white">
-        <div className="mx-auto max-w-5xl">
-          <p className="rounded-xl border border-red-900 bg-red-950/40 p-6 text-red-200">
-            You do not have admin access.
-          </p>
+      <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
+        <div className="mx-auto max-w-7xl">
+          <h1 className="text-3xl font-bold">Admin Reviews</h1>
+          <p className="mt-4 text-zinc-400">Loading submitted reports...</p>
         </div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-black p-6 text-white">
-      <div className="mx-auto max-w-6xl">
-        <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <Link href="/admin" className="text-sm text-gray-400 hover:text-white">
-            ← Back to Admin
-          </Link>
-
-          <Link
-            href="/admin/tournaments"
-            className="text-sm text-gray-400 hover:text-white"
-          >
-            Bracket Manager →
-          </Link>
-        </div>
-
-        <section className="mb-8 rounded-2xl border border-gray-800 bg-gray-950 p-6">
-          <p className="mb-3 text-sm font-bold uppercase tracking-[0.25em] text-red-500">
-            Admin Tools
-          </p>
-
-          <h1 className="mb-3 text-4xl font-black">Score Review Queue</h1>
-
-          <p className="max-w-2xl text-gray-400">
-            Review player-submitted scores, choose the official winner, and
-            approve results faster.
-          </p>
-
-          <div className="mt-6 rounded-xl border border-gray-800 bg-black p-4">
-            <p className="text-sm text-gray-500">Pending Reviews</p>
-            <p className="text-4xl font-black">{reviewCount}</p>
-          </div>
-        </section>
-
-        {message && (
-          <p className="mb-6 rounded-lg border border-gray-800 bg-gray-950 p-4 text-sm text-gray-300">
-            {message}
-          </p>
-        )}
-
-        {loading ? (
-          <p className="rounded-xl border border-gray-800 bg-gray-950 p-6 text-gray-400">
-            Loading score reviews...
-          </p>
-        ) : matches.length === 0 ? (
-          <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
-            <h2 className="mb-2 text-2xl font-bold">No scores need review</h2>
-
-            <p className="mb-5 text-gray-400">
-              When players submit scores from My Tournaments, they will appear
-              here.
+    <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="mb-2 text-sm font-black uppercase tracking-widest text-red-400">
+              BattleGrid Admin
             </p>
+
+            <h1 className="text-4xl font-black">Match Report Reviews</h1>
+
+            <p className="mt-3 text-zinc-400">
+              Approve or reject player-submitted match results.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Link
+              href="/admin"
+              className="rounded-lg border border-zinc-700 px-4 py-2 text-center font-semibold text-white hover:bg-zinc-800"
+            >
+              Admin Dashboard
+            </Link>
 
             <Link
               href="/admin/tournaments"
-              className="inline-block rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200"
+              className="rounded-lg bg-red-600 px-4 py-2 text-center font-semibold text-white hover:bg-red-700"
             >
-              Go to Bracket Manager
+              Manage Winners
             </Link>
-          </section>
-        ) : (
-          <div className="grid gap-5">
-            {matches.map((match) => {
-              const tournament = tournaments[match.tournament_id];
+          </div>
+        </div>
 
-              return (
-                <section
-                  key={match.id}
-                  className="rounded-xl border border-gray-800 bg-gray-950 p-5"
-                >
-                  <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                    <div>
-                      <h2 className="text-2xl font-bold">
-                        {tournament?.name || "Unknown Tournament"}
-                      </h2>
-
-                      <p className="mt-1 text-sm text-gray-400">
-                        {tournament?.game || "Game not set"} •{" "}
-                        {tournament?.platform || "Platform not set"}
-                      </p>
-
-                      <p className="mt-2 text-sm text-gray-500">
-                        Round {match.round} — Match {match.match_number}
-                      </p>
-                    </div>
-
-                    <span className="w-fit rounded-full border border-yellow-700 bg-yellow-950/40 px-3 py-1 text-xs font-bold text-yellow-300">
-                      Pending Review
-                    </span>
-                  </div>
-
-                  <div className="mb-5 grid gap-3 md:grid-cols-2">
-                    <div className="rounded-lg border border-gray-800 bg-black p-4">
-                      <p className="text-sm text-gray-500">
-                        {playerName(match.player1_id)}
-                      </p>
-                      <p className="text-3xl font-black">
-                        {match.player1_score ?? "-"}
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-gray-800 bg-black p-4">
-                      <p className="text-sm text-gray-500">
-                        {playerName(match.player2_id)}
-                      </p>
-                      <p className="text-3xl font-black">
-                        {match.player2_score ?? "-"}
-                      </p>
-                    </div>
-                  </div>
-
-                  <p className="mb-5 rounded-lg border border-gray-800 bg-black p-3 text-sm text-gray-300">
-                    Submitted by{" "}
-                    <span className="font-bold text-white">
-                      {playerName(match.score_submitted_by)}
-                    </span>{" "}
-                    on {formatDisplayDate(match.score_submitted_at)}.
-                  </p>
-
-                  <div className="mb-5">
-                    <label className="mb-1 block text-sm text-gray-400">
-                      Official Winner
-                    </label>
-
-                    <select
-                      className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
-                      value={winnerInputs[match.id] || ""}
-                      onChange={(e) =>
-                        updateWinnerInput(match.id, e.target.value)
-                      }
-                    >
-                      <option value="">Choose winner</option>
-                      <option value={match.player1_id || ""}>
-                        {playerName(match.player1_id)}
-                      </option>
-                      <option value={match.player2_id || ""}>
-                        {playerName(match.player2_id)}
-                      </option>
-                    </select>
-                  </div>
-
-                  <div className="flex flex-col gap-3 md:flex-row">
-                    <button
-                      type="button"
-                      onClick={() => approveResult(match)}
-                      disabled={savingMatchId === match.id}
-                      className="rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200 disabled:opacity-50"
-                    >
-                      {savingMatchId === match.id
-                        ? "Approving..."
-                        : "Approve Result"}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => dismissSubmission(match)}
-                      disabled={savingMatchId === match.id}
-                      className="rounded-lg border border-red-800 px-5 py-3 font-bold text-red-300 hover:bg-red-950/40 disabled:opacity-50"
-                    >
-                      Dismiss Submission
-                    </button>
-
-                    <Link
-                      href={`/brackets?tournament=${match.tournament_id}`}
-                      className="rounded-lg border border-gray-700 px-5 py-3 text-center font-bold text-white hover:bg-gray-900"
-                    >
-                      View Bracket
-                    </Link>
-                  </div>
-                </section>
-              );
-            })}
+        {message && (
+          <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-red-300">
+            {message}
           </div>
         )}
+
+        <section className="mb-8 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+            <p className="text-sm text-zinc-500">Total Reports</p>
+            <p className="mt-2 text-4xl font-black">{reports.length}</p>
+          </div>
+
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+            <p className="text-sm text-zinc-500">Pending</p>
+            <p className="mt-2 text-4xl font-black text-yellow-300">
+              {totalPending}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+            <p className="text-sm text-zinc-500">Approved</p>
+            <p className="mt-2 text-4xl font-black text-green-300">
+              {totalApproved}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+            <p className="text-sm text-zinc-500">Rejected</p>
+            <p className="mt-2 text-4xl font-black text-red-300">
+              {totalRejected}
+            </p>
+          </div>
+        </section>
+
+        <section className="mb-8 rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+          <div className="grid gap-4 lg:grid-cols-[1fr_240px]">
+            <div>
+              <label className="mb-2 block text-sm font-semibold text-zinc-300">
+                Search Reports
+              </label>
+
+              <input
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="Search tournament, player, game, or platform..."
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-semibold text-zinc-300">
+                Report Status
+              </label>
+
+              <select
+                value={filter}
+                onChange={(event) =>
+                  setFilter(event.target.value as ReviewFilter)
+                }
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
+              >
+                <option value="all">All Reports</option>
+                <option value="pending">Pending Only</option>
+                <option value="approved">Approved Only</option>
+                <option value="rejected">Rejected Only</option>
+              </select>
+            </div>
+          </div>
+
+          <p className="mt-4 text-sm text-zinc-500">
+            Tournaments with reports: {totalTournamentsWithReports}
+          </p>
+        </section>
+
+        <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-2xl font-bold">Submitted Reports</h2>
+
+              <p className="mt-2 text-sm text-zinc-400">
+                Showing {filteredReports.length} of {reports.length} reports.
+              </p>
+            </div>
+
+            <Link
+              href="/brackets"
+              className="rounded-lg border border-zinc-700 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-zinc-800"
+            >
+              View Public Brackets
+            </Link>
+          </div>
+
+          {reports.length === 0 && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-8 text-center">
+              <h3 className="text-xl font-bold">No reports submitted yet</h3>
+
+              <p className="mt-2 text-zinc-400">
+                Player score reports will appear here after players submit
+                match results from a tournament details page.
+              </p>
+            </div>
+          )}
+
+          {reports.length > 0 && filteredReports.length === 0 && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-8 text-center">
+              <h3 className="text-xl font-bold">No reports match your filters</h3>
+
+              <p className="mt-2 text-zinc-400">
+                Try changing the search text or status filter.
+              </p>
+            </div>
+          )}
+
+          {filteredReports.length > 0 && (
+            <div className="grid gap-5 lg:grid-cols-2">
+              {filteredReports.map((report) => {
+                const match = matches[report.match_id];
+
+                const player1Id = match?.player1_id || null;
+                const player2Id = match?.player2_id || null;
+
+                return (
+                  <article
+                    key={report.id}
+                    className="rounded-xl border border-zinc-800 bg-zinc-950 p-5"
+                  >
+                    <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-sm font-bold uppercase tracking-widest text-red-400">
+                          {getTournamentName(report.tournament_id)}
+                        </p>
+
+                        <h3 className="mt-2 text-xl font-black">
+                          Round {match?.round || 1} • Match{" "}
+                          {match?.match_number || "?"}
+                        </h3>
+
+                        <p className="mt-2 text-sm text-zinc-400">
+                          {getTournamentGame(report.tournament_id)} •{" "}
+                          {getTournamentPlatform(report.tournament_id)}
+                        </p>
+                      </div>
+
+                      <span
+                        className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${
+                          report.status === "approved"
+                            ? "bg-green-500/10 text-green-300"
+                            : report.status === "rejected"
+                            ? "bg-red-500/10 text-red-300"
+                            : "bg-yellow-500/10 text-yellow-300"
+                        }`}
+                      >
+                        {report.status}
+                      </span>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div
+                        className={`rounded-lg border p-4 ${
+                          report.reported_winner_id === player1Id
+                            ? "border-green-500/40 bg-green-500/10"
+                            : "border-zinc-800 bg-zinc-900"
+                        }`}
+                      >
+                        <p className="font-bold">{getPlayerName(player1Id)}</p>
+                        <p className="mt-1 text-sm text-zinc-500">
+                          {getPlayerPlatform(player1Id)}
+                        </p>
+                        <p className="mt-3 text-3xl font-black">
+                          {report.player1_score}
+                        </p>
+                      </div>
+
+                      <div
+                        className={`rounded-lg border p-4 ${
+                          report.reported_winner_id === player2Id
+                            ? "border-green-500/40 bg-green-500/10"
+                            : "border-zinc-800 bg-zinc-900"
+                        }`}
+                      >
+                        <p className="font-bold">{getPlayerName(player2Id)}</p>
+                        <p className="mt-1 text-sm text-zinc-500">
+                          {getPlayerPlatform(player2Id)}
+                        </p>
+                        <p className="mt-3 text-3xl font-black">
+                          {report.player2_score}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                        <p className="text-sm text-zinc-500">Reported Winner</p>
+                        <p className="mt-1 font-bold text-green-300">
+                          {getPlayerName(report.reported_winner_id)}
+                        </p>
+                      </div>
+
+                      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                        <p className="text-sm text-zinc-500">Submitted By</p>
+                        <p className="mt-1 font-bold">
+                          {getPlayerName(report.submitted_by)}
+                        </p>
+                      </div>
+                    </div>
+
+                    {report.notes && (
+                      <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                        <p className="text-sm text-zinc-500">Notes</p>
+                        <p className="mt-1 text-sm text-zinc-300">
+                          {report.notes}
+                        </p>
+                      </div>
+                    )}
+
+                    {match?.winner_id && (
+                      <div className="mt-5 rounded-lg border border-green-500/40 bg-green-500/10 p-4">
+                        <p className="text-sm text-green-200">Current Saved Winner</p>
+                        <p className="mt-1 font-bold text-green-300">
+                          {getPlayerName(match.winner_id)}
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                      <button
+                        onClick={() => approveReport(report)}
+                        disabled={
+                          reviewingReportId === report.id ||
+                          report.status !== "pending"
+                        }
+                        className="rounded-lg bg-green-600 px-4 py-3 text-sm font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {reviewingReportId === report.id
+                          ? "Approving..."
+                          : "Approve Report"}
+                      </button>
+
+                      <button
+                        onClick={() => rejectReport(report)}
+                        disabled={
+                          reviewingReportId === report.id ||
+                          report.status !== "pending"
+                        }
+                        className="rounded-lg bg-red-600 px-4 py-3 text-sm font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {reviewingReportId === report.id
+                          ? "Rejecting..."
+                          : "Reject Report"}
+                      </button>
+
+                      <Link
+                        href="/admin/tournaments"
+                        className="rounded-lg border border-zinc-700 px-4 py-3 text-center text-sm font-bold text-white hover:bg-zinc-800"
+                      >
+                        Manage Bracket
+                      </Link>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
       </div>
     </main>
   );
