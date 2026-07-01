@@ -2,510 +2,603 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabase";
-
-type Match = {
-  id: string;
-  tournament_id: string;
-  round: number | null;
-  match_number: number | null;
-  player1_id: string | null;
-  player2_id: string | null;
-  winner_id: string | null;
-};
-
-type Tournament = {
-  id: string;
-  name: string;
-  game: string | null;
-  platform: string | null;
-};
+import { checkIsAdmin } from "../../lib/admin";
 
 type Profile = {
   id: string;
   gamer_tag: string | null;
   platform: string | null;
   favorite_team: string | null;
+  is_admin: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
 };
 
-type ReviewFilter = "all" | "needs-winner" | "completed";
+type PlayerStats = {
+  id: string;
+  tournaments_joined: number;
+  matches_played: number;
+  wins: number;
+  losses: number;
+  tournaments_won: number;
+  win_percentage: number;
+  last_match_at: string | null;
+};
 
-export default function AdminReviewsPage() {
-  const [matches, setMatches] = useState<Match[]>([]);
-  const [tournaments, setTournaments] = useState<Record<string, Tournament>>({});
-  const [profiles, setProfiles] = useState<Record<string, Profile>>({});
-  const [searchText, setSearchText] = useState("");
-  const [filter, setFilter] = useState<ReviewFilter>("needs-winner");
+type RoleFilter = "all" | "admins" | "players";
 
+type SortOption =
+  | "newest"
+  | "gamer_tag"
+  | "wins"
+  | "matches_played"
+  | "win_percentage"
+  | "tournaments_joined";
+
+function formatDateTime(value: string | null) {
+  if (!value) return "Not set";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "Not set";
+
+  return date.toLocaleString();
+}
+
+function formatWinPercentage(value: number | null | undefined) {
+  return `${Number(value || 0).toFixed(1)}%`;
+}
+
+export default function AdminPlayersPage() {
+  const router = useRouter();
+
+  const [currentUserId, setCurrentUserId] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [statsRows, setStatsRows] = useState<PlayerStats[]>([]);
+
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
+  const [platformFilter, setPlatformFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<SortOption>("newest");
+
+  const [checkingAdmin, setCheckingAdmin] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState("");
   const [message, setMessage] = useState("");
 
-  const getPlayerName = useCallback(
-    (playerId: string | null) => {
-      if (!playerId) {
-        return "Waiting for player";
-      }
+  const loadPlayers = useCallback(async () => {
+    setCheckingAdmin(true);
+    setLoading(true);
+    setMessage("");
 
-      const profile = profiles[playerId];
+    const adminCheck = await checkIsAdmin();
 
-      if (profile?.gamer_tag) {
-        return profile.gamer_tag;
-      }
-
-      return "Unknown Player";
-    },
-    [profiles]
-  );
-
-  const getPlayerPlatform = useCallback(
-    (playerId: string | null) => {
-      if (!playerId) {
-        return "";
-      }
-
-      return profiles[playerId]?.platform || "";
-    },
-    [profiles]
-  );
-
-  useEffect(() => {
-    let active = true;
-
-    async function loadReviews() {
-      await Promise.resolve();
-
-      const { data: matchData, error: matchError } = await supabase
-        .from("matches")
-        .select(
-          "id, tournament_id, round, match_number, player1_id, player2_id, winner_id"
-        )
-        .order("round", { ascending: true })
-        .order("match_number", { ascending: true });
-
-      if (!active) {
-        return;
-      }
-
-      if (matchError) {
-        setMessage(matchError.message);
-        setLoading(false);
-        return;
-      }
-
-      const loadedMatches = (matchData || []) as Match[];
-
-      if (loadedMatches.length === 0) {
-        setMatches([]);
-        setTournaments({});
-        setProfiles({});
-        setLoading(false);
-        return;
-      }
-
-      const tournamentIds = Array.from(
-        new Set(
-          loadedMatches
-            .map((match) => match.tournament_id)
-            .filter((id): id is string => Boolean(id))
-        )
-      );
-
-      const playerIds = Array.from(
-        new Set(
-          loadedMatches
-            .flatMap((match) => [
-              match.player1_id,
-              match.player2_id,
-              match.winner_id,
-            ])
-            .filter((id): id is string => Boolean(id))
-        )
-      );
-
-      const tournamentMap: Record<string, Tournament> = {};
-      const profileMap: Record<string, Profile> = {};
-
-      if (tournamentIds.length > 0) {
-        const { data: tournamentData, error: tournamentError } = await supabase
-          .from("tournaments")
-          .select("id, name, game, platform")
-          .in("id", tournamentIds);
-
-        if (!active) {
-          return;
-        }
-
-        if (tournamentError) {
-          setMessage(tournamentError.message);
-          setLoading(false);
-          return;
-        }
-
-        ((tournamentData || []) as Tournament[]).forEach((tournament) => {
-          tournamentMap[tournament.id] = tournament;
-        });
-      }
-
-      if (playerIds.length > 0) {
-        const { data: profileData, error: profileError } = await supabase
-          .from("profiles")
-          .select("id, gamer_tag, platform, favorite_team")
-          .in("id", playerIds);
-
-        if (!active) {
-          return;
-        }
-
-        if (profileError) {
-          setMessage(profileError.message);
-          setLoading(false);
-          return;
-        }
-
-        ((profileData || []) as Profile[]).forEach((profile) => {
-          profileMap[profile.id] = profile;
-        });
-      }
-
-      setMatches(loadedMatches);
-      setTournaments(tournamentMap);
-      setProfiles(profileMap);
+    if (!adminCheck.user) {
+      setCheckingAdmin(false);
       setLoading(false);
+      router.push("/login");
+      return;
     }
 
-    loadReviews();
+    if (!adminCheck.isAdmin) {
+      setCheckingAdmin(false);
+      setLoading(false);
+      router.push("/tournaments");
+      return;
+    }
+
+    setCurrentUserId(adminCheck.user.id);
+    setIsAdmin(true);
+    setCheckingAdmin(false);
+
+    const { data: profileData, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, gamer_tag, platform, favorite_team, is_admin, created_at, updated_at")
+      .order("created_at", { ascending: false });
+
+    if (profileError) {
+      setMessage(`Error loading players: ${profileError.message}`);
+      setProfiles([]);
+      setStatsRows([]);
+      setLoading(false);
+      return;
+    }
+
+    setProfiles((profileData || []) as Profile[]);
+
+    const { data: statsData, error: statsError } = await supabase
+      .from("player_stats")
+      .select(
+        "id, tournaments_joined, matches_played, wins, losses, tournaments_won, win_percentage, last_match_at"
+      );
+
+    if (statsError) {
+      setStatsRows([]);
+      setMessage(
+        "Players loaded. Stats could not load. If needed, rerun the leaderboard SQL view."
+      );
+    } else {
+      setStatsRows((statsData || []) as PlayerStats[]);
+    }
+
+    setLoading(false);
+  }, [router]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void loadPlayers();
+    }, 0);
 
     return () => {
-      active = false;
+      window.clearTimeout(timeoutId);
     };
-  }, []);
+  }, [loadPlayers]);
 
-  const totalNeedsWinner = useMemo(() => {
-    return matches.filter((match) => !match.winner_id).length;
-  }, [matches]);
+  const statsById = useMemo(() => {
+    return statsRows.reduce((acc, row) => {
+      acc[row.id] = row;
+      return acc;
+    }, {} as Record<string, PlayerStats>);
+  }, [statsRows]);
 
-  const totalCompleted = useMemo(() => {
-    return matches.filter((match) => Boolean(match.winner_id)).length;
-  }, [matches]);
+  const platforms = useMemo(() => {
+    const platformSet = new Set(
+      profiles
+        .map((profile) => profile.platform?.trim())
+        .filter((platform): platform is string => Boolean(platform))
+    );
 
-  const totalTournamentsWithMatches = useMemo(() => {
-    return new Set(matches.map((match) => match.tournament_id)).size;
-  }, [matches]);
+    return Array.from(platformSet).sort((a, b) => a.localeCompare(b));
+  }, [profiles]);
 
-  const filteredMatches = useMemo(() => {
-    const normalizedSearch = searchText.trim().toLowerCase();
+  const adminCount = useMemo(() => {
+    return profiles.filter((profile) => profile.is_admin).length;
+  }, [profiles]);
 
-    return matches.filter((match) => {
-      if (filter === "needs-winner" && match.winner_id) {
-        return false;
+  const playerCount = useMemo(() => {
+    return profiles.filter((profile) => !profile.is_admin).length;
+  }, [profiles]);
+
+  const totalMatches = useMemo(() => {
+    return statsRows.reduce((total, row) => total + row.matches_played, 0);
+  }, [statsRows]);
+
+  const filteredProfiles = useMemo(() => {
+    const cleanSearch = search.trim().toLowerCase();
+
+    const searchedProfiles = profiles.filter((profile) => {
+      const gamerTag = profile.gamer_tag?.toLowerCase() || "";
+      const platform = profile.platform?.toLowerCase() || "";
+      const favoriteTeam = profile.favorite_team?.toLowerCase() || "";
+      const role = profile.is_admin ? "admin" : "player";
+
+      const matchesSearch =
+        !cleanSearch ||
+        gamerTag.includes(cleanSearch) ||
+        platform.includes(cleanSearch) ||
+        favoriteTeam.includes(cleanSearch) ||
+        role.includes(cleanSearch);
+
+      const matchesRole =
+        roleFilter === "all" ||
+        (roleFilter === "admins" && profile.is_admin) ||
+        (roleFilter === "players" && !profile.is_admin);
+
+      const matchesPlatform =
+        platformFilter === "all" || profile.platform === platformFilter;
+
+      return matchesSearch && matchesRole && matchesPlatform;
+    });
+
+    const sortedProfiles = [...searchedProfiles];
+
+    sortedProfiles.sort((a, b) => {
+      const aStats = statsById[a.id];
+      const bStats = statsById[b.id];
+
+      if (sortBy === "gamer_tag") {
+        return profileName(a).localeCompare(profileName(b));
       }
 
-      if (filter === "completed" && !match.winner_id) {
-        return false;
+      if (sortBy === "wins") {
+        return (bStats?.wins || 0) - (aStats?.wins || 0);
       }
 
-      if (!normalizedSearch) {
-        return true;
+      if (sortBy === "matches_played") {
+        return (bStats?.matches_played || 0) - (aStats?.matches_played || 0);
       }
 
-      const tournament = tournaments[match.tournament_id];
-      const player1Name = getPlayerName(match.player1_id).toLowerCase();
-      const player2Name = getPlayerName(match.player2_id).toLowerCase();
-      const winnerName = getPlayerName(match.winner_id).toLowerCase();
-      const tournamentName = tournament?.name?.toLowerCase() || "";
-      const game = tournament?.game?.toLowerCase() || "";
-      const platform = tournament?.platform?.toLowerCase() || "";
+      if (sortBy === "win_percentage") {
+        return (bStats?.win_percentage || 0) - (aStats?.win_percentage || 0);
+      }
+
+      if (sortBy === "tournaments_joined") {
+        return (
+          (bStats?.tournaments_joined || 0) -
+          (aStats?.tournaments_joined || 0)
+        );
+      }
 
       return (
-        tournamentName.includes(normalizedSearch) ||
-        game.includes(normalizedSearch) ||
-        platform.includes(normalizedSearch) ||
-        player1Name.includes(normalizedSearch) ||
-        player2Name.includes(normalizedSearch) ||
-        winnerName.includes(normalizedSearch)
+        new Date(b.created_at || 0).getTime() -
+        new Date(a.created_at || 0).getTime()
       );
     });
-  }, [matches, filter, searchText, tournaments, getPlayerName]);
 
-  function getTournamentName(tournamentId: string) {
-    return tournaments[tournamentId]?.name || "Unknown Tournament";
+    return sortedProfiles;
+  }, [platformFilter, profiles, roleFilter, search, sortBy, statsById]);
+
+  function profileName(profile: Profile) {
+    return profile.gamer_tag || "Unnamed Player";
   }
 
-  function getTournamentGame(tournamentId: string) {
-    return tournaments[tournamentId]?.game || "Game not set";
+  function roleLabel(profile: Profile) {
+    return profile.is_admin ? "Admin" : "Player";
   }
 
-  function getTournamentPlatform(tournamentId: string) {
-    return tournaments[tournamentId]?.platform || "Platform not set";
+  function roleClass(profile: Profile) {
+    if (profile.is_admin) {
+      return "border-red-700 bg-red-950/40 text-red-300";
+    }
+
+    return "border-gray-700 bg-black text-gray-300";
   }
 
-  if (loading) {
+  async function toggleAdmin(profile: Profile) {
+    if (!isAdmin) {
+      setMessage("You do not have admin access.");
+      return;
+    }
+
+    if (profile.id === currentUserId && profile.is_admin) {
+      setMessage("You cannot remove your own admin access from this page.");
+      return;
+    }
+
+    const nextAdminValue = !Boolean(profile.is_admin);
+
+    const confirmed = window.confirm(
+      nextAdminValue
+        ? `Make ${profileName(profile)} an admin?`
+        : `Remove admin access from ${profileName(profile)}?`
+    );
+
+    if (!confirmed) return;
+
+    setSavingId(profile.id);
+    setMessage("");
+
+    const { error } = await supabase
+      .from("profiles")
+      .update({
+        is_admin: nextAdminValue,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", profile.id);
+
+    if (error) {
+      setMessage(`Error updating admin access: ${error.message}`);
+      setSavingId("");
+      return;
+    }
+
+    setMessage(
+      nextAdminValue
+        ? `${profileName(profile)} is now an admin.`
+        : `${profileName(profile)} is now a regular player.`
+    );
+
+    await loadPlayers();
+    setSavingId("");
+  }
+
+  if (checkingAdmin || loading) {
     return (
-      <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-        <div className="mx-auto max-w-7xl">
-          <h1 className="text-3xl font-bold">Admin Reviews</h1>
-          <p className="mt-4 text-zinc-400">Loading match reviews...</p>
+      <main className="min-h-screen bg-black p-6 text-white">
+        <div className="mx-auto max-w-6xl">
+          <p className="rounded-xl border border-gray-800 bg-gray-950 p-6 text-gray-400">
+            {checkingAdmin ? "Checking admin access..." : "Loading players..."}
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <main className="min-h-screen bg-black p-6 text-white">
+        <div className="mx-auto max-w-6xl">
+          <p className="rounded-xl border border-red-900 bg-red-950/40 p-6 text-red-200">
+            You do not have admin access.
+          </p>
         </div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
+    <main className="min-h-screen bg-black p-6 text-white">
       <div className="mx-auto max-w-7xl">
-        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="mb-2 text-sm font-black uppercase tracking-widest text-red-400">
-              BattleGrid Admin
-            </p>
+        <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <Link href="/admin" className="text-sm text-gray-400 hover:text-white">
+            ← Back to Admin
+          </Link>
 
-            <h1 className="text-4xl font-black">Match Reviews</h1>
-
-            <p className="mt-3 text-zinc-400">
-              Review matches that still need winners and quickly jump to bracket
-              management.
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <Link
-              href="/admin"
-              className="rounded-lg border border-zinc-700 px-4 py-2 text-center font-semibold text-white hover:bg-zinc-800"
-            >
-              Admin Dashboard
-            </Link>
-
-            <Link
-              href="/admin/tournaments"
-              className="rounded-lg bg-red-600 px-4 py-2 text-center font-semibold text-white hover:bg-red-700"
-            >
-              Manage Winners
-            </Link>
-          </div>
+          <Link
+            href="/leaderboard"
+            className="text-sm text-gray-400 hover:text-white"
+          >
+            View Leaderboard →
+          </Link>
         </div>
 
-        {message && (
-          <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-red-300">
-            {message}
-          </div>
-        )}
+        <section className="mb-8 rounded-2xl border border-gray-800 bg-gray-950 p-6">
+          <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="mb-3 text-sm font-bold uppercase tracking-[0.25em] text-red-500">
+                Admin Tools
+              </p>
 
-        <section className="mb-8 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Total Matches</p>
-            <p className="mt-2 text-4xl font-black">{matches.length}</p>
-          </div>
+              <h1 className="mb-3 text-4xl font-black">Players</h1>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Needs Winner</p>
-            <p className="mt-2 text-4xl font-black text-yellow-300">
-              {totalNeedsWinner}
-            </p>
-          </div>
+              <p className="max-w-2xl text-gray-400">
+                Search player accounts, view stats, open public profiles, and
+                manage admin access.
+              </p>
+            </div>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Completed</p>
-            <p className="mt-2 text-4xl font-black text-green-300">
-              {totalCompleted}
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Tournaments</p>
-            <p className="mt-2 text-4xl font-black">
-              {totalTournamentsWithMatches}
-            </p>
+            <button
+              type="button"
+              onClick={loadPlayers}
+              disabled={loading}
+              className="rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200 disabled:opacity-50"
+            >
+              {loading ? "Refreshing..." : "Refresh Players"}
+            </button>
           </div>
         </section>
 
-        <section className="mb-8 rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-          <div className="grid gap-4 lg:grid-cols-[1fr_240px]">
+        {message && (
+          <p className="mb-6 rounded-lg border border-yellow-800 bg-yellow-950/30 p-4 text-sm text-yellow-200">
+            {message}
+          </p>
+        )}
+
+        <section className="mb-8 grid gap-4 md:grid-cols-4">
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Total Accounts</p>
+            <p className="mt-2 text-4xl font-black">{profiles.length}</p>
+          </div>
+
+          <div className="rounded-xl border border-red-800 bg-red-950/20 p-5">
+            <p className="text-sm text-red-300">Admins</p>
+            <p className="mt-2 text-4xl font-black">{adminCount}</p>
+          </div>
+
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Players</p>
+            <p className="mt-2 text-4xl font-black">{playerCount}</p>
+          </div>
+
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Match Entries</p>
+            <p className="mt-2 text-4xl font-black">{totalMatches}</p>
+          </div>
+        </section>
+
+        <section className="mb-6 rounded-xl border border-gray-800 bg-gray-950 p-5">
+          <div className="grid gap-4 lg:grid-cols-4">
             <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                Search Reviews
+              <label className="mb-2 block text-sm text-gray-400">
+                Search
               </label>
 
               <input
-                value={searchText}
-                onChange={(event) => setSearchText(event.target.value)}
-                placeholder="Search tournament, game, platform, or player..."
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
+                className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                placeholder="Search gamer tag, platform, team, role..."
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
               />
             </div>
 
             <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                Review Status
+              <label className="mb-2 block text-sm text-gray-400">Role</label>
+
+              <select
+                className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                value={roleFilter}
+                onChange={(event) => setRoleFilter(event.target.value as RoleFilter)}
+              >
+                <option value="all">All Roles</option>
+                <option value="admins">Admins</option>
+                <option value="players">Players</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm text-gray-400">
+                Platform
               </label>
 
               <select
-                value={filter}
-                onChange={(event) =>
-                  setFilter(event.target.value as ReviewFilter)
-                }
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
+                className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                value={platformFilter}
+                onChange={(event) => setPlatformFilter(event.target.value)}
               >
-                <option value="all">All Matches</option>
-                <option value="needs-winner">Needs Winner</option>
-                <option value="completed">Completed</option>
+                <option value="all">All Platforms</option>
+
+                {platforms.map((platform) => (
+                  <option key={platform} value={platform}>
+                    {platform}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm text-gray-400">
+                Sort By
+              </label>
+
+              <select
+                className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                value={sortBy}
+                onChange={(event) => setSortBy(event.target.value as SortOption)}
+              >
+                <option value="newest">Newest Accounts</option>
+                <option value="gamer_tag">Gamer Tag</option>
+                <option value="wins">Most Wins</option>
+                <option value="matches_played">Most Matches</option>
+                <option value="win_percentage">Best Win Rate</option>
+                <option value="tournaments_joined">Tournaments Joined</option>
               </select>
             </div>
           </div>
         </section>
 
-        <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-2xl font-bold">Review Queue</h2>
+        {filteredProfiles.length === 0 ? (
+          <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+            <h2 className="mb-2 text-2xl font-bold">No players found</h2>
 
-              <p className="mt-2 text-sm text-zinc-400">
-                Showing {filteredMatches.length} of {matches.length} matches.
-              </p>
-            </div>
+            <p className="mb-5 text-gray-400">
+              Try clearing your filters or search text.
+            </p>
 
-            <Link
-              href="/admin/tournaments"
-              className="rounded-lg bg-red-600 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-red-700"
+            <button
+              type="button"
+              onClick={() => {
+                setSearch("");
+                setRoleFilter("all");
+                setPlatformFilter("all");
+                setSortBy("newest");
+              }}
+              className="rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200"
             >
-              Save Winners
-            </Link>
-          </div>
+              Clear Filters
+            </button>
+          </section>
+        ) : (
+          <section className="grid gap-4">
+            {filteredProfiles.map((profile) => {
+              const stats = statsById[profile.id];
 
-          {matches.length === 0 && (
-            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-8 text-center">
-              <h3 className="text-xl font-bold">No matches generated yet</h3>
+              return (
+                <article
+                  key={profile.id}
+                  className="rounded-xl border border-gray-800 bg-gray-950 p-5"
+                >
+                  <div className="grid gap-5 lg:grid-cols-[1fr_auto] lg:items-start">
+                    <div>
+                      <div className="mb-3 flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded-full border px-3 py-1 text-xs font-bold ${roleClass(
+                            profile
+                          )}`}
+                        >
+                          {roleLabel(profile)}
+                        </span>
 
-              <p className="mt-2 text-zinc-400">
-                Generate a bracket from Admin Tournaments first. Matches will
-                appear here after brackets are created.
-              </p>
-
-              <Link
-                href="/admin/tournaments"
-                className="mt-6 inline-block rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700"
-              >
-                Go to Admin Tournaments
-              </Link>
-            </div>
-          )}
-
-          {matches.length > 0 && filteredMatches.length === 0 && (
-            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-8 text-center">
-              <h3 className="text-xl font-bold">No matches found</h3>
-
-              <p className="mt-2 text-zinc-400">
-                Try changing the search text or review status filter.
-              </p>
-            </div>
-          )}
-
-          {filteredMatches.length > 0 && (
-            <div className="grid gap-5 lg:grid-cols-2">
-              {filteredMatches.map((match) => {
-                const player1Name = getPlayerName(match.player1_id);
-                const player2Name = getPlayerName(match.player2_id);
-                const winnerName = getPlayerName(match.winner_id);
-
-                return (
-                  <article
-                    key={match.id}
-                    className="rounded-xl border border-zinc-800 bg-zinc-950 p-5"
-                  >
-                    <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <p className="text-sm font-bold uppercase tracking-widest text-red-400">
-                          {getTournamentName(match.tournament_id)}
-                        </p>
-
-                        <h3 className="mt-2 text-xl font-black">
-                          Round {match.round || 1} • Match{" "}
-                          {match.match_number || "?"}
-                        </h3>
-
-                        <p className="mt-2 text-sm text-zinc-400">
-                          {getTournamentGame(match.tournament_id)} •{" "}
-                          {getTournamentPlatform(match.tournament_id)}
-                        </p>
+                        {profile.id === currentUserId && (
+                          <span className="rounded-full border border-yellow-700 bg-yellow-950/40 px-3 py-1 text-xs font-bold text-yellow-300">
+                            You
+                          </span>
+                        )}
                       </div>
 
-                      <span
-                        className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${
-                          match.winner_id
-                            ? "bg-green-500/10 text-green-300"
-                            : "bg-yellow-500/10 text-yellow-300"
-                        }`}
-                      >
-                        {match.winner_id ? "Completed" : "Needs Winner"}
-                      </span>
-                    </div>
+                      <h2 className="text-2xl font-black">
+                        {profileName(profile)}
+                      </h2>
 
-                    <div className="space-y-3">
-                      <div
-                        className={`rounded-lg border p-4 ${
-                          match.winner_id === match.player1_id
-                            ? "border-green-500/40 bg-green-500/10"
-                            : "border-zinc-800 bg-zinc-900"
-                        }`}
-                      >
-                        <p className="font-bold">{player1Name}</p>
-                        <p className="mt-1 text-sm text-zinc-500">
-                          {getPlayerPlatform(match.player1_id) ||
-                            "Platform not set"}
-                        </p>
-                      </div>
+                      <p className="mt-1 text-sm text-gray-500">
+                        {profile.platform || "Platform not set"} •{" "}
+                        {profile.favorite_team || "Favorite team not set"}
+                      </p>
 
-                      <div className="text-center text-xs font-black uppercase text-zinc-500">
-                        vs
-                      </div>
-
-                      <div
-                        className={`rounded-lg border p-4 ${
-                          match.winner_id === match.player2_id
-                            ? "border-green-500/40 bg-green-500/10"
-                            : "border-zinc-800 bg-zinc-900"
-                        }`}
-                      >
-                        <p className="font-bold">{player2Name}</p>
-                        <p className="mt-1 text-sm text-zinc-500">
-                          {getPlayerPlatform(match.player2_id) ||
-                            "Platform not set"}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-                      <p className="text-sm text-zinc-500">Winner</p>
-
-                      <p
-                        className={`mt-1 text-lg font-black ${
-                          match.winner_id ? "text-green-300" : "text-white"
-                        }`}
-                      >
-                        {match.winner_id ? winnerName : "Not selected yet"}
+                      <p className="mt-2 text-xs text-gray-600">
+                        Joined: {formatDateTime(profile.created_at)} • Updated:{" "}
+                        {formatDateTime(profile.updated_at)}
                       </p>
                     </div>
 
-                    <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                    <div className="flex flex-col gap-3 sm:flex-row lg:flex-col">
                       <Link
-                        href="/admin/tournaments"
-                        className="rounded-lg bg-red-600 px-4 py-3 text-center text-sm font-bold text-white hover:bg-red-700"
+                        href={`/players/${profile.id}`}
+                        className="rounded-lg bg-white px-5 py-3 text-center text-sm font-bold text-black hover:bg-gray-200"
                       >
-                        Manage Winner
+                        Public Profile
                       </Link>
 
-                      <Link
-                        href="/brackets"
-                        className="rounded-lg border border-zinc-700 px-4 py-3 text-center text-sm font-bold text-white hover:bg-zinc-800"
+                      <button
+                        type="button"
+                        onClick={() => toggleAdmin(profile)}
+                        disabled={savingId === profile.id}
+                        className={`rounded-lg border px-5 py-3 text-sm font-bold disabled:opacity-50 ${
+                          profile.is_admin
+                            ? "border-red-700 text-red-300 hover:bg-red-950/40"
+                            : "border-gray-700 text-white hover:bg-gray-900"
+                        }`}
                       >
-                        View Public Bracket
-                      </Link>
+                        {savingId === profile.id
+                          ? "Saving..."
+                          : profile.is_admin
+                            ? "Remove Admin"
+                            : "Make Admin"}
+                      </button>
                     </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
+                  </div>
+
+                  <div className="mt-5 grid gap-3 md:grid-cols-6">
+                    <div className="rounded-lg border border-gray-800 bg-black p-3">
+                      <p className="text-xs text-gray-500">Record</p>
+                      <p className="mt-1 text-xl font-black">
+                        {stats?.wins || 0}-{stats?.losses || 0}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-800 bg-black p-3">
+                      <p className="text-xs text-gray-500">Win Rate</p>
+                      <p className="mt-1 text-xl font-black">
+                        {formatWinPercentage(stats?.win_percentage)}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-800 bg-black p-3">
+                      <p className="text-xs text-gray-500">Matches</p>
+                      <p className="mt-1 text-xl font-black">
+                        {stats?.matches_played || 0}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-800 bg-black p-3">
+                      <p className="text-xs text-gray-500">Joined</p>
+                      <p className="mt-1 text-xl font-black">
+                        {stats?.tournaments_joined || 0}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-800 bg-black p-3">
+                      <p className="text-xs text-gray-500">Tournament Wins</p>
+                      <p className="mt-1 text-xl font-black">
+                        {stats?.tournaments_won || 0}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-800 bg-black p-3">
+                      <p className="text-xs text-gray-500">Last Match</p>
+                      <p className="mt-1 text-sm font-bold">
+                        {formatDateTime(stats?.last_match_at || null)}
+                      </p>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+        )}
       </div>
     </main>
   );

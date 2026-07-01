@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "../lib/supabase";
 
 type Profile = {
@@ -9,358 +11,468 @@ type Profile = {
   gamer_tag: string | null;
   platform: string | null;
   favorite_team: string | null;
+  is_admin: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
 };
 
-type ProfileForm = {
-  gamerTag: string;
-  platform: string;
-  favoriteTeam: string;
+type PlayerStats = {
+  id: string;
+  gamer_tag: string | null;
+  platform: string | null;
+  favorite_team: string | null;
+  tournaments_joined: number;
+  matches_played: number;
+  wins: number;
+  losses: number;
+  tournaments_won: number;
+  win_percentage: number;
+  last_match_at: string | null;
 };
 
-const platformOptions = [
-  "Xbox Series X|S",
-  "PlayStation 5",
-  "PC",
-  "Xbox One",
-  "PlayStation 4",
-  "Nintendo Switch",
-  "Mobile",
-];
+function formatDateTime(value: string | null) {
+  if (!value) return "Not set";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "Not set";
+
+  return date.toLocaleString();
+}
 
 export default function ProfilePage() {
-  const [userId, setUserId] = useState<string | null>(null);
-  const [email, setEmail] = useState("");
-  const [form, setForm] = useState<ProfileForm>({
-    gamerTag: "",
-    platform: "",
-    favoriteTeam: "",
-  });
+  const router = useRouter();
+
+  const [userId, setUserId] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [stats, setStats] = useState<PlayerStats | null>(null);
+
+  const [gamerTag, setGamerTag] = useState("");
+  const [platform, setPlatform] = useState("");
+  const [favoriteTeam, setFavoriteTeam] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
-  const [needsLogin, setNeedsLogin] = useState(false);
+
+  const loadProfile = useCallback(async () => {
+    setLoading(true);
+    setMessage("");
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      router.push("/login");
+      return;
+    }
+
+    setUserId(user.id);
+    setUserEmail(user.email || "");
+
+    const { data: profileData, error: profileError } = await supabase
+      .from("profiles")
+      .select(
+        "id, gamer_tag, platform, favorite_team, is_admin, created_at, updated_at"
+      )
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      setMessage(`Error loading profile: ${profileError.message}`);
+      setProfile(null);
+      setStats(null);
+      setLoading(false);
+      return;
+    }
+
+    if (!profileData) {
+      const fallbackGamerTag = user.email?.includes("@")
+        ? user.email.split("@")[0]
+        : "New Player";
+
+      const { data: createdProfileData, error: createProfileError } =
+        await supabase
+          .from("profiles")
+          .insert({
+            id: user.id,
+            gamer_tag: fallbackGamerTag,
+            platform: null,
+            favorite_team: null,
+            is_admin: false,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .select(
+            "id, gamer_tag, platform, favorite_team, is_admin, created_at, updated_at"
+          )
+          .maybeSingle();
+
+      if (createProfileError) {
+        setMessage(`Error creating profile: ${createProfileError.message}`);
+        setProfile(null);
+        setStats(null);
+        setLoading(false);
+        return;
+      }
+
+      const createdProfile = createdProfileData as Profile;
+
+      setProfile(createdProfile);
+      setGamerTag(createdProfile.gamer_tag || "");
+      setPlatform(createdProfile.platform || "");
+      setFavoriteTeam(createdProfile.favorite_team || "");
+    } else {
+      const loadedProfile = profileData as Profile;
+
+      setProfile(loadedProfile);
+      setGamerTag(loadedProfile.gamer_tag || "");
+      setPlatform(loadedProfile.platform || "");
+      setFavoriteTeam(loadedProfile.favorite_team || "");
+    }
+
+    const { data: statsData, error: statsError } = await supabase
+      .from("player_stats")
+      .select(
+        "id, gamer_tag, platform, favorite_team, tournaments_joined, matches_played, wins, losses, tournaments_won, win_percentage, last_match_at"
+      )
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (statsError) {
+      setStats(null);
+    } else {
+      setStats((statsData || null) as PlayerStats | null);
+    }
+
+    setLoading(false);
+  }, [router]);
 
   useEffect(() => {
-    let active = true;
-
-    async function loadProfile() {
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-
-      if (!active) {
-        return;
-      }
-
-      if (userError || !user) {
-        setNeedsLogin(true);
-        setMessage("You must be logged in to edit your profile.");
-        setLoading(false);
-        return;
-      }
-
-      const { data: profileData, error: profileError } = await supabase
-        .from("profiles")
-        .select("id, gamer_tag, platform, favorite_team")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (!active) {
-        return;
-      }
-
-      if (profileError) {
-        setMessage(profileError.message);
-        setLoading(false);
-        return;
-      }
-
-      const profile = profileData as Profile | null;
-
-      setUserId(user.id);
-      setEmail(user.email || "");
-      setForm({
-        gamerTag: profile?.gamer_tag || "",
-        platform: profile?.platform || "",
-        favoriteTeam: profile?.favorite_team || "",
-      });
-      setNeedsLogin(false);
-      setLoading(false);
-    }
-
-    loadProfile();
+    const timeoutId = window.setTimeout(() => {
+      void loadProfile();
+    }, 0);
 
     return () => {
-      active = false;
+      window.clearTimeout(timeoutId);
     };
-  }, []);
+  }, [loadProfile]);
 
-  function updateForm(field: keyof ProfileForm, value: string) {
-    setForm((currentForm) => ({
-      ...currentForm,
-      [field]: value,
-    }));
-  }
+  const winRateLabel = useMemo(() => {
+    if (!stats) return "0%";
 
-  async function saveProfile() {
+    return `${Number(stats.win_percentage || 0).toFixed(1)}%`;
+  }, [stats]);
+
+  const profileIsComplete = useMemo(() => {
+    return Boolean(gamerTag.trim() && platform.trim() && favoriteTeam.trim());
+  }, [favoriteTeam, gamerTag, platform]);
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
     if (!userId) {
-      setMessage("You must be logged in to save your profile.");
+      router.push("/login");
       return;
     }
 
-    if (!form.gamerTag.trim()) {
-      setMessage("Enter your gamer tag before saving.");
-      return;
-    }
-
-    if (!form.platform.trim()) {
-      setMessage("Select your platform before saving.");
+    if (!gamerTag.trim()) {
+      setMessage("Gamer tag is required.");
       return;
     }
 
     setSaving(true);
     setMessage("");
 
-    const { error } = await supabase.from("profiles").upsert(
-      {
+    const { data, error } = await supabase
+      .from("profiles")
+      .upsert({
         id: userId,
-        gamer_tag: form.gamerTag.trim(),
-        platform: form.platform.trim(),
-        favorite_team: form.favoriteTeam.trim() || null,
-      },
-      {
-        onConflict: "id",
-      }
-    );
+        gamer_tag: gamerTag.trim(),
+        platform: platform.trim() || null,
+        favorite_team: favoriteTeam.trim() || null,
+        updated_at: new Date().toISOString(),
+      })
+      .select(
+        "id, gamer_tag, platform, favorite_team, is_admin, created_at, updated_at"
+      )
+      .maybeSingle();
 
     if (error) {
-      setMessage(error.message);
+      setMessage(`Error saving profile: ${error.message}`);
       setSaving(false);
       return;
     }
 
+    if (data) {
+      setProfile(data as Profile);
+    }
+
     setMessage("Profile saved successfully.");
+    await loadProfile();
     setSaving(false);
   }
 
   async function signOut() {
-    setMessage("");
+    await supabase.auth.signOut();
 
-    const { error } = await supabase.auth.signOut();
+    setUserId("");
+    setUserEmail("");
+    setProfile(null);
+    setStats(null);
 
-    if (error) {
-      setMessage(error.message);
-      return;
-    }
-
-    window.location.href = "/login";
+    router.push("/login");
+    router.refresh();
   }
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-        <div className="mx-auto max-w-5xl">
-          <h1 className="text-3xl font-bold">Profile</h1>
-          <p className="mt-4 text-zinc-400">Loading profile...</p>
+      <main className="min-h-screen bg-black p-6 text-white">
+        <div className="mx-auto max-w-6xl">
+          <p className="rounded-xl border border-gray-800 bg-gray-950 p-6 text-gray-400">
+            Loading profile...
+          </p>
         </div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-      <div className="mx-auto max-w-5xl">
-        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="mb-2 text-sm font-bold uppercase tracking-widest text-red-400">
-              Player Profile
-            </p>
-
-            <h1 className="text-4xl font-bold">Profile</h1>
-
-            <p className="mt-3 text-zinc-400">
-              Set your gamer tag, platform, and favorite team so your name shows
-              correctly in tournaments and brackets.
-            </p>
-          </div>
+    <main className="min-h-screen bg-black p-6 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <Link href="/" className="text-sm text-gray-400 hover:text-white">
+            ← Back Home
+          </Link>
 
           <div className="flex flex-col gap-3 sm:flex-row">
-            <Link
-              href="/tournaments"
-              className="rounded-lg border border-zinc-700 px-4 py-2 text-center font-semibold text-white hover:bg-zinc-800"
-            >
-              Browse Tournaments
-            </Link>
+            {userId && (
+              <Link
+                href={`/players/${userId}`}
+                className="text-sm text-gray-400 hover:text-white"
+              >
+                Public Profile →
+              </Link>
+            )}
 
             <Link
               href="/my-tournaments"
-              className="rounded-lg bg-red-600 px-4 py-2 text-center font-semibold text-white hover:bg-red-700"
+              className="text-sm text-gray-400 hover:text-white"
             >
-              My Tournaments
+              My Tournaments →
             </Link>
           </div>
         </div>
 
-        {message && (
-          <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-red-300">
-            {message}
-          </div>
-        )}
+        <section className="mb-8 rounded-2xl border border-gray-800 bg-gray-950 p-6">
+          <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="mb-3 text-sm font-bold uppercase tracking-[0.25em] text-red-500">
+                Player Account
+              </p>
 
-        {needsLogin && (
-          <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
-            <h2 className="text-2xl font-bold">Login Required</h2>
+              <h1 className="mb-3 text-4xl font-black">My Profile</h1>
 
-            <p className="mt-3 text-zinc-400">
-              You need to log in before you can create or edit your player
-              profile.
-            </p>
-
-            <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
-              <Link
-                href="/login"
-                className="rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700"
-              >
-                Login
-              </Link>
-
-              <Link
-                href="/signup"
-                className="rounded-lg border border-zinc-700 px-5 py-3 font-semibold text-white hover:bg-zinc-800"
-              >
-                Sign Up
-              </Link>
+              <p className="max-w-2xl text-gray-400">
+                Manage your gamer tag, platform, favorite team, and view your
+                BattleGrid stats.
+              </p>
             </div>
-          </section>
+
+            <div className="flex flex-col gap-3 sm:flex-row">
+              {profile?.is_admin && (
+                <Link
+                  href="/admin"
+                  className="rounded-lg border border-red-800 px-5 py-3 text-center font-bold text-red-300 hover:bg-red-950/40"
+                >
+                  Admin Dashboard
+                </Link>
+              )}
+
+              <button
+                type="button"
+                onClick={signOut}
+                className="rounded-lg border border-gray-700 px-5 py-3 font-bold text-white hover:bg-gray-900"
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {message && (
+          <p className="mb-6 rounded-lg border border-yellow-800 bg-yellow-950/30 p-4 text-sm text-yellow-200">
+            {message}
+          </p>
         )}
 
-        {!needsLogin && (
-          <div className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
-            <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-              <h2 className="text-2xl font-bold">Edit Player Info</h2>
+        <section className="mb-8 grid gap-4 md:grid-cols-4">
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Tournaments Joined</p>
+            <p className="mt-2 text-4xl font-black">
+              {stats?.tournaments_joined || 0}
+            </p>
+          </div>
 
-              <div className="mt-6 space-y-5">
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Record</p>
+            <p className="mt-2 text-4xl font-black">
+              {stats?.wins || 0}-{stats?.losses || 0}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Win Rate</p>
+            <p className="mt-2 text-4xl font-black">{winRateLabel}</p>
+          </div>
+
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Tournament Wins</p>
+            <p className="mt-2 text-4xl font-black">
+              {stats?.tournaments_won || 0}
+            </p>
+          </div>
+        </section>
+
+        <section className="grid gap-6 lg:grid-cols-[1fr_420px]">
+          <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+            <h2 className="mb-5 text-2xl font-bold">Edit Profile</h2>
+
+            <form onSubmit={saveProfile} className="grid gap-4">
+              <div>
+                <label className="mb-2 block text-sm text-gray-400">
+                  Gamer Tag
+                </label>
+
+                <input
+                  className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                  placeholder="TheJerseyGamer"
+                  value={gamerTag}
+                  onChange={(event) => setGamerTag(event.target.value)}
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
                 <div>
-                  <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                    Email
-                  </label>
-
-                  <input
-                    value={email}
-                    disabled
-                    className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-4 py-3 text-zinc-500 outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                    Gamer Tag
-                  </label>
-
-                  <input
-                    value={form.gamerTag}
-                    onChange={(event) =>
-                      updateForm("gamerTag", event.target.value)
-                    }
-                    placeholder="Example: JerseyGamer"
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm font-semibold text-zinc-300">
+                  <label className="mb-2 block text-sm text-gray-400">
                     Platform
                   </label>
 
-                  <select
-                    value={form.platform}
-                    onChange={(event) =>
-                      updateForm("platform", event.target.value)
-                    }
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-                  >
-                    <option value="">Select platform</option>
-
-                    {platformOptions.map((platform) => (
-                      <option key={platform} value={platform}>
-                        {platform}
-                      </option>
-                    ))}
-                  </select>
+                  <input
+                    className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                    placeholder="PS5 / Xbox / PC"
+                    value={platform}
+                    onChange={(event) => setPlatform(event.target.value)}
+                  />
                 </div>
 
                 <div>
-                  <label className="mb-2 block text-sm font-semibold text-zinc-300">
+                  <label className="mb-2 block text-sm text-gray-400">
                     Favorite Team
                   </label>
 
                   <input
-                    value={form.favoriteTeam}
-                    onChange={(event) =>
-                      updateForm("favoriteTeam", event.target.value)
-                    }
-                    placeholder="Example: Eagles, Cowboys, Chiefs"
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
+                    className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                    placeholder="Eagles, Cowboys, Giants..."
+                    value={favoriteTeam}
+                    onChange={(event) => setFavoriteTeam(event.target.value)}
                   />
                 </div>
+              </div>
 
-                <div className="flex flex-col gap-3 sm:flex-row">
-                  <button
-                    onClick={saveProfile}
-                    disabled={saving}
-                    className="rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {saving ? "Saving..." : "Save Profile"}
-                  </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200 disabled:opacity-50"
+              >
+                {saving ? "Saving..." : "Save Profile"}
+              </button>
+            </form>
+          </section>
 
-                  <button
-                    onClick={signOut}
-                    className="rounded-lg border border-zinc-700 px-5 py-3 font-semibold text-white hover:bg-zinc-800"
-                  >
-                    Sign Out
-                  </button>
-                </div>
+          <aside className="grid h-fit gap-6">
+            <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+              <h2 className="mb-4 text-2xl font-bold">Account Info</h2>
+
+              <div className="grid gap-3 text-sm text-gray-300">
+                <p>
+                  <span className="text-gray-500">Email:</span>{" "}
+                  {userEmail || "Not set"}
+                </p>
+
+                <p>
+                  <span className="text-gray-500">Role:</span>{" "}
+                  {profile?.is_admin ? "Admin" : "Player"}
+                </p>
+
+                <p>
+                  <span className="text-gray-500">Profile Created:</span>{" "}
+                  {formatDateTime(profile?.created_at || null)}
+                </p>
+
+                <p>
+                  <span className="text-gray-500">Last Updated:</span>{" "}
+                  {formatDateTime(profile?.updated_at || null)}
+                </p>
               </div>
             </section>
 
-            <aside className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-              <h2 className="text-2xl font-bold">Profile Preview</h2>
+            <section
+              className={`rounded-xl border p-6 ${
+                profileIsComplete
+                  ? "border-green-800 bg-green-950/20"
+                  : "border-yellow-800 bg-yellow-950/20"
+              }`}
+            >
+              <h2
+                className={`mb-2 text-2xl font-bold ${
+                  profileIsComplete ? "text-green-300" : "text-yellow-300"
+                }`}
+              >
+                {profileIsComplete ? "Profile Complete" : "Profile Incomplete"}
+              </h2>
 
-              <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950 p-5">
-                <p className="text-sm font-bold uppercase tracking-widest text-red-400">
-                  Gamer Tag
-                </p>
+              <p className="text-sm text-gray-300">
+                {profileIsComplete
+                  ? "Your profile is ready for tournaments and public rankings."
+                  : "Add your gamer tag, platform, and favorite team so other players know who they are facing."}
+              </p>
+            </section>
 
-                <p className="mt-2 text-3xl font-bold">
-                  {form.gamerTag || "Not set"}
-                </p>
+            <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+              <h2 className="mb-4 text-2xl font-bold">Quick Links</h2>
 
-                <div className="mt-6 space-y-4">
-                  <div>
-                    <p className="text-sm text-zinc-500">Platform</p>
-                    <p className="mt-1 font-semibold">
-                      {form.platform || "Not set"}
-                    </p>
-                  </div>
+              <div className="grid gap-3">
+                {userId && (
+                  <Link
+                    href={`/players/${userId}`}
+                    className="rounded-lg bg-white px-5 py-3 text-center font-bold text-black hover:bg-gray-200"
+                  >
+                    View Public Profile
+                  </Link>
+                )}
 
-                  <div>
-                    <p className="text-sm text-zinc-500">Favorite Team</p>
-                    <p className="mt-1 font-semibold">
-                      {form.favoriteTeam || "Not set"}
-                    </p>
-                  </div>
-                </div>
+                <Link
+                  href="/leaderboard"
+                  className="rounded-lg border border-gray-700 px-5 py-3 text-center font-bold text-white hover:bg-gray-900"
+                >
+                  Leaderboard
+                </Link>
+
+                <Link
+                  href="/tournaments"
+                  className="rounded-lg border border-gray-700 px-5 py-3 text-center font-bold text-white hover:bg-gray-900"
+                >
+                  Browse Tournaments
+                </Link>
               </div>
-
-              <div className="mt-6 rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm text-yellow-100">
-                Save your profile before joining tournaments so other players
-                can see your gamer tag instead of “Unknown Player.”
-              </div>
-            </aside>
-          </div>
-        )}
+            </section>
+          </aside>
+        </section>
       </div>
     </main>
   );

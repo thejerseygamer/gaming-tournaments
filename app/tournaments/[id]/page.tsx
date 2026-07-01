@@ -1,19 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabase";
+import { checkIsAdmin } from "../../lib/admin";
 
 type Tournament = {
   id: string;
   name: string;
   game: string | null;
   platform: string | null;
+  description: string | null;
+  rules: string | null;
+  start_time: string | null;
   prize_pool: number | null;
   entry_fee: number | null;
   max_players: number | null;
-  created_at: string | null;
+  registration_open: boolean;
+  created_at: string;
 };
 
 type TournamentPlayer = {
@@ -21,7 +26,7 @@ type TournamentPlayer = {
   player_id: string;
 };
 
-type Profile = {
+type PlayerProfile = {
   id: string;
   gamer_tag: string | null;
   platform: string | null;
@@ -31,563 +36,366 @@ type Profile = {
 type Match = {
   id: string;
   tournament_id: string;
-  round: number | null;
-  match_number: number | null;
+  round: number;
+  match_number: number;
   player1_id: string | null;
   player2_id: string | null;
   winner_id: string | null;
+  status: string | null;
+  player1_score: number | null;
+  player2_score: number | null;
+  score_submitted_by: string | null;
+  created_at: string;
 };
 
-type MatchReport = {
-  id: string;
-  match_id: string;
-  tournament_id: string;
-  submitted_by: string;
-  player1_score: number;
-  player2_score: number;
-  reported_winner_id: string;
-  notes: string | null;
-  status: "pending" | "approved" | "rejected";
-  created_at: string | null;
-};
+function formatDateTime(value: string | null) {
+  if (!value) return "Not set";
 
-type ReportForm = {
-  player1Score: string;
-  player2Score: string;
-  notes: string;
-};
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "Not set";
+
+  return date.toLocaleString();
+}
+
+function buildProfileMap(profiles: PlayerProfile[]) {
+  return profiles.reduce((acc, profile) => {
+    acc[profile.id] = profile;
+    return acc;
+  }, {} as Record<string, PlayerProfile>);
+}
 
 export default function TournamentDetailsPage() {
-  const params = useParams<{ id: string }>();
+  const params = useParams();
+  const router = useRouter();
+
   const tournamentId = typeof params.id === "string" ? params.id : "";
 
+  const [userId, setUserId] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+
   const [tournament, setTournament] = useState<Tournament | null>(null);
-  const [players, setPlayers] = useState<TournamentPlayer[]>([]);
-  const [profiles, setProfiles] = useState<Record<string, Profile>>({});
+  const [playerRows, setPlayerRows] = useState<TournamentPlayer[]>([]);
+  const [profilesById, setProfilesById] = useState<
+    Record<string, PlayerProfile>
+  >({});
   const [matches, setMatches] = useState<Match[]>([]);
-  const [reports, setReports] = useState<MatchReport[]>([]);
-  const [reportForms, setReportForms] = useState<Record<string, ReportForm>>({});
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [currentUserProfile, setCurrentUserProfile] = useState<Profile | null>(
-    null
-  );
 
   const [loading, setLoading] = useState(true);
   const [joining, setJoining] = useState(false);
-  const [submittingMatchId, setSubmittingMatchId] = useState<string | null>(null);
+  const [leaving, setLeaving] = useState(false);
   const [message, setMessage] = useState("");
 
-  useEffect(() => {
-    let active = true;
+  const loadTournamentDetails = useCallback(async () => {
+    setLoading(true);
+    setMessage("");
 
-    async function loadTournamentData() {
-      await Promise.resolve();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-      if (!active) {
-        return;
-      }
+    setUserId(user?.id || "");
 
-      setLoading(true);
-      setMessage("");
+    const adminCheck = await checkIsAdmin();
+    setIsAdmin(Boolean(adminCheck.isAdmin));
 
-      if (!tournamentId) {
-        setMessage("Tournament ID is missing.");
-        setLoading(false);
-        return;
-      }
-
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!active) {
-        return;
-      }
-
-      setCurrentUserId(user?.id || null);
-
-      if (user) {
-        const { data: userProfileData, error: userProfileError } = await supabase
-          .from("profiles")
-          .select("id, gamer_tag, platform, favorite_team")
-          .eq("id", user.id)
-          .maybeSingle();
-
-        if (!active) {
-          return;
-        }
-
-        if (userProfileError) {
-          setMessage(userProfileError.message);
-          setLoading(false);
-          return;
-        }
-
-        setCurrentUserProfile((userProfileData || null) as Profile | null);
-      } else {
-        setCurrentUserProfile(null);
-      }
-
-      const { data: tournamentData, error: tournamentError } = await supabase
-        .from("tournaments")
-        .select(
-          "id, name, game, platform, prize_pool, entry_fee, max_players, created_at"
-        )
-        .eq("id", tournamentId)
-        .maybeSingle();
-
-      if (!active) {
-        return;
-      }
-
-      if (tournamentError) {
-        setMessage(tournamentError.message);
-        setLoading(false);
-        return;
-      }
-
-      if (!tournamentData) {
-        setTournament(null);
-        setMessage("Tournament not found.");
-        setLoading(false);
-        return;
-      }
-
-      const loadedTournament = tournamentData as Tournament;
-      setTournament(loadedTournament);
-
-      const { data: playerData, error: playerError } = await supabase
-        .from("tournament_players")
-        .select("tournament_id, player_id")
-        .eq("tournament_id", tournamentId);
-
-      if (!active) {
-        return;
-      }
-
-      if (playerError) {
-        setMessage(playerError.message);
-        setLoading(false);
-        return;
-      }
-
-      const loadedPlayers = (playerData || []) as TournamentPlayer[];
-      setPlayers(loadedPlayers);
-
-      const { data: matchData, error: matchError } = await supabase
-        .from("matches")
-        .select(
-          "id, tournament_id, round, match_number, player1_id, player2_id, winner_id"
-        )
-        .eq("tournament_id", tournamentId)
-        .order("round", { ascending: true })
-        .order("match_number", { ascending: true });
-
-      if (!active) {
-        return;
-      }
-
-      if (matchError) {
-        setMessage(matchError.message);
-        setLoading(false);
-        return;
-      }
-
-      const loadedMatches = (matchData || []) as Match[];
-      setMatches(loadedMatches);
-
-      const { data: reportData, error: reportError } = await supabase
-        .from("match_reports")
-        .select(
-          "id, match_id, tournament_id, submitted_by, player1_score, player2_score, reported_winner_id, notes, status, created_at"
-        )
-        .eq("tournament_id", tournamentId)
-        .order("created_at", { ascending: false });
-
-      if (!active) {
-        return;
-      }
-
-      if (reportError) {
-        setMessage(reportError.message);
-        setLoading(false);
-        return;
-      }
-
-      const loadedReports = (reportData || []) as MatchReport[];
-      setReports(loadedReports);
-
-      const profileIds = Array.from(
-        new Set(
-          [
-            ...loadedPlayers.map((player) => player.player_id),
-            ...loadedMatches.flatMap((match) => [
-              match.player1_id,
-              match.player2_id,
-              match.winner_id,
-            ]),
-            ...loadedReports.map((report) => report.reported_winner_id),
-            user?.id || null,
-          ].filter((id): id is string => Boolean(id))
-        )
-      );
-
-      if (profileIds.length > 0) {
-        const { data: profileData, error: profileError } = await supabase
-          .from("profiles")
-          .select("id, gamer_tag, platform, favorite_team")
-          .in("id", profileIds);
-
-        if (!active) {
-          return;
-        }
-
-        if (profileError) {
-          setMessage(profileError.message);
-          setLoading(false);
-          return;
-        }
-
-        const profileMap: Record<string, Profile> = {};
-
-        ((profileData || []) as Profile[]).forEach((profile) => {
-          profileMap[profile.id] = profile;
-        });
-
-        setProfiles(profileMap);
-      } else {
-        setProfiles({});
-      }
-
-      const initialForms: Record<string, ReportForm> = {};
-
-      loadedMatches.forEach((match) => {
-        initialForms[match.id] = {
-          player1Score: "",
-          player2Score: "",
-          notes: "",
-        };
-      });
-
-      setReportForms(initialForms);
+    if (!tournamentId) {
+      setTournament(null);
+      setPlayerRows([]);
+      setProfilesById({});
+      setMatches([]);
+      setMessage("Tournament not found.");
       setLoading(false);
+      return;
     }
 
-    loadTournamentData();
+    const { data: tournamentData, error: tournamentError } = await supabase
+      .from("tournaments")
+      .select(
+        "id, name, game, platform, description, rules, start_time, prize_pool, entry_fee, max_players, registration_open, created_at"
+      )
+      .eq("id", tournamentId)
+      .maybeSingle();
 
-    return () => {
-      active = false;
-    };
+    if (tournamentError) {
+      setMessage(`Error loading tournament: ${tournamentError.message}`);
+      setTournament(null);
+      setPlayerRows([]);
+      setProfilesById({});
+      setMatches([]);
+      setLoading(false);
+      return;
+    }
+
+    if (!tournamentData) {
+      setMessage("Tournament not found.");
+      setTournament(null);
+      setPlayerRows([]);
+      setProfilesById({});
+      setMatches([]);
+      setLoading(false);
+      return;
+    }
+
+    const loadedTournament = tournamentData as Tournament;
+
+    setTournament(loadedTournament);
+
+    const { data: playerData, error: playerError } = await supabase
+      .from("tournament_players")
+      .select("tournament_id, player_id")
+      .eq("tournament_id", tournamentId);
+
+    if (playerError) {
+      setMessage(`Error loading registered players: ${playerError.message}`);
+      setPlayerRows([]);
+    }
+
+    const loadedPlayerRows = (playerData || []) as TournamentPlayer[];
+
+    setPlayerRows(loadedPlayerRows);
+
+    const { data: matchData, error: matchError } = await supabase
+      .from("matches")
+      .select(
+        "id, tournament_id, round, match_number, player1_id, player2_id, winner_id, status, player1_score, player2_score, score_submitted_by, created_at"
+      )
+      .eq("tournament_id", tournamentId)
+      .order("round", { ascending: true })
+      .order("match_number", { ascending: true });
+
+    if (matchError) {
+      setMessage(`Error loading bracket: ${matchError.message}`);
+      setMatches([]);
+    }
+
+    const loadedMatches = (matchData || []) as Match[];
+
+    setMatches(loadedMatches);
+
+    const profileIds = Array.from(
+      new Set(
+        [
+          ...loadedPlayerRows.map((row) => row.player_id),
+          ...loadedMatches.flatMap((match) => [
+            match.player1_id,
+            match.player2_id,
+            match.winner_id,
+            match.score_submitted_by,
+          ]),
+        ].filter((id): id is string => Boolean(id))
+      )
+    );
+
+    if (profileIds.length > 0) {
+      const { data: profileData, error: profileError } = await supabase
+        .from("profiles")
+        .select("id, gamer_tag, platform, favorite_team")
+        .in("id", profileIds);
+
+      if (profileError) {
+        setMessage(`Error loading player profiles: ${profileError.message}`);
+        setProfilesById({});
+      } else {
+        setProfilesById(buildProfileMap((profileData || []) as PlayerProfile[]));
+      }
+    } else {
+      setProfilesById({});
+    }
+
+    setLoading(false);
   }, [tournamentId]);
 
-  const isJoined = useMemo(() => {
-    if (!currentUserId) {
-      return false;
-    }
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void loadTournamentDetails();
+    }, 0);
 
-    return players.some((player) => player.player_id === currentUserId);
-  }, [players, currentUserId]);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [loadTournamentDetails]);
 
-  const profileIsComplete = useMemo(() => {
-    return Boolean(
-      currentUserProfile?.gamer_tag?.trim() &&
-        currentUserProfile?.platform?.trim()
-    );
-  }, [currentUserProfile]);
+  const registeredPlayers = useMemo(() => {
+    return playerRows
+      .map((row) => {
+        return {
+          row,
+          profile: profilesById[row.player_id] || null,
+        };
+      })
+      .sort((a, b) => {
+        const aName = a.profile?.gamer_tag || "Unnamed Player";
+        const bName = b.profile?.gamer_tag || "Unnamed Player";
 
-  const spotsTaken = players.length;
-  const maxPlayers = tournament?.max_players || null;
-  const spotsRemaining =
-    maxPlayers !== null ? Math.max(maxPlayers - spotsTaken, 0) : null;
-  const tournamentIsFull = maxPlayers !== null && spotsTaken >= maxPlayers;
-  const bracketGenerated = matches.length > 0;
+        return aName.localeCompare(bName);
+      });
+  }, [playerRows, profilesById]);
 
-  const myMatches = useMemo(() => {
-    if (!currentUserId) {
-      return [];
-    }
+  const playerCount = useMemo(() => {
+    return playerRows.length;
+  }, [playerRows]);
 
+  const userJoined = useMemo(() => {
+    if (!userId) return false;
+
+    return playerRows.some((row) => row.player_id === userId);
+  }, [playerRows, userId]);
+
+  const bracketGenerated = useMemo(() => {
+    return matches.length > 0;
+  }, [matches]);
+
+  const completedMatches = useMemo(() => {
+    return matches.filter((match) => match.status === "completed").length;
+  }, [matches]);
+
+  const pendingReviewMatches = useMemo(() => {
     return matches.filter(
-      (match) =>
-        match.player1_id === currentUserId || match.player2_id === currentUserId
-    );
-  }, [matches, currentUserId]);
+      (match) => match.status === "pending" && match.score_submitted_by
+    ).length;
+  }, [matches]);
 
-  const reportsByMatch = useMemo(() => {
-    const groupedReports: Record<string, MatchReport[]> = {};
+  function playerName(playerId: string | null) {
+    if (!playerId) return "TBD";
 
-    reports.forEach((report) => {
-      if (!groupedReports[report.match_id]) {
-        groupedReports[report.match_id] = [];
-      }
-
-      groupedReports[report.match_id].push(report);
-    });
-
-    return groupedReports;
-  }, [reports]);
-
-  function getPlayerName(playerId: string | null) {
-    if (!playerId) {
-      return "Waiting for player";
-    }
-
-    const profile = profiles[playerId];
-
-    if (profile?.gamer_tag) {
-      return profile.gamer_tag;
-    }
-
-    return "Unknown Player";
+    return profilesById[playerId]?.gamer_tag || "Unnamed Player";
   }
 
-  function getPlayerPlatform(playerId: string | null) {
-    if (!playerId) {
-      return "Platform not set";
-    }
+  function isFull() {
+    if (!tournament?.max_players) return false;
 
-    return profiles[playerId]?.platform || "Platform not set";
+    return playerCount >= tournament.max_players;
   }
 
-  function getPlayerFavoriteTeam(playerId: string) {
-    return profiles[playerId]?.favorite_team || "Favorite team not set";
+  function canJoin() {
+    if (!tournament) return false;
+    if (!userId) return false;
+    if (userJoined) return false;
+    if (bracketGenerated) return false;
+    if (!tournament.registration_open) return false;
+    if (isFull()) return false;
+
+    return true;
   }
 
-  function updateReportForm(
-    matchId: string,
-    field: keyof ReportForm,
-    value: string
-  ) {
-    setReportForms((currentForms) => ({
-      ...currentForms,
-      [matchId]: {
-        player1Score: currentForms[matchId]?.player1Score || "",
-        player2Score: currentForms[matchId]?.player2Score || "",
-        notes: currentForms[matchId]?.notes || "",
-        [field]: value,
-      },
-    }));
+  function registrationStatusLabel() {
+    if (!tournament) return "Unavailable";
+    if (bracketGenerated) return "Bracket Locked";
+    if (isFull()) return "Tournament Full";
+    if (!tournament.registration_open) return "Registration Closed";
+
+    return "Registration Open";
   }
 
-  function currentUserAlreadyReported(matchId: string) {
-    if (!currentUserId) {
-      return false;
+  function registrationStatusClass() {
+    if (bracketGenerated) {
+      return "border-yellow-700 bg-yellow-950/40 text-yellow-300";
     }
 
-    return reports.some(
-      (report) =>
-        report.match_id === matchId &&
-        report.submitted_by === currentUserId &&
-        report.status !== "rejected"
-    );
+    if (isFull() || !tournament?.registration_open) {
+      return "border-red-700 bg-red-950/40 text-red-300";
+    }
+
+    return "border-green-700 bg-green-950/40 text-green-300";
   }
 
-  function canSubmitReport(match: Match) {
-    if (!currentUserId) {
-      return false;
+  function scoreText(match: Match) {
+    if (
+      match.player1_score === null ||
+      match.player1_score === undefined ||
+      match.player2_score === null ||
+      match.player2_score === undefined
+    ) {
+      return "No score";
     }
 
-    if (match.winner_id) {
-      return false;
-    }
-
-    if (currentUserAlreadyReported(match.id)) {
-      return false;
-    }
-
-    return match.player1_id === currentUserId || match.player2_id === currentUserId;
+    return `${match.player1_score} - ${match.player2_score}`;
   }
 
   async function joinTournament() {
-    if (!tournament) {
-      setMessage("Tournament not found.");
+    if (!tournament) return;
+
+    if (!userId) {
+      router.push("/login");
+      return;
+    }
+
+    if (!canJoin()) {
+      setMessage("You cannot join this tournament right now.");
       return;
     }
 
     setJoining(true);
     setMessage("");
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
+    const { error } = await supabase.from("tournament_players").insert({
+      tournament_id: tournament.id,
+      player_id: userId,
+    });
 
-    if (userError || !user) {
-      setMessage("You must be logged in to join this tournament.");
+    if (error) {
+      setMessage(`Error joining tournament: ${error.message}`);
       setJoining(false);
       return;
     }
 
-    const { data: profileData, error: profileError } = await supabase
-      .from("profiles")
-      .select("id, gamer_tag, platform, favorite_team")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (profileError) {
-      setMessage(profileError.message);
-      setJoining(false);
-      return;
-    }
-
-    const profile = (profileData || null) as Profile | null;
-    setCurrentUserProfile(profile);
-
-    if (!profile?.gamer_tag?.trim() || !profile?.platform?.trim()) {
-      setMessage("Complete your profile before joining a tournament.");
-      setJoining(false);
-      return;
-    }
-
-    if (tournamentIsFull) {
-      setMessage("This tournament is full.");
-      setJoining(false);
-      return;
-    }
-
-    const { data: existingJoin, error: existingJoinError } = await supabase
-      .from("tournament_players")
-      .select("tournament_id, player_id")
-      .eq("tournament_id", tournament.id)
-      .eq("player_id", user.id)
-      .maybeSingle();
-
-    if (existingJoinError) {
-      setMessage(existingJoinError.message);
-      setJoining(false);
-      return;
-    }
-
-    if (existingJoin) {
-      setMessage("You have already joined this tournament.");
-      setJoining(false);
-      return;
-    }
-
-    const { error: joinError } = await supabase
-      .from("tournament_players")
-      .insert({
-        tournament_id: tournament.id,
-        player_id: user.id,
-      });
-
-    if (joinError) {
-      setMessage(joinError.message);
-      setJoining(false);
-      return;
-    }
-
-    setCurrentUserId(user.id);
-    setPlayers((currentPlayers) => [
-      ...currentPlayers,
-      {
-        tournament_id: tournament.id,
-        player_id: user.id,
-      },
-    ]);
-
-    setProfiles((currentProfiles) => ({
-      ...currentProfiles,
-      [user.id]: profile,
-    }));
-
-    setMessage("You joined the tournament successfully.");
+    setMessage(`You joined "${tournament.name}".`);
+    await loadTournamentDetails();
     setJoining(false);
   }
 
-  async function submitMatchReport(match: Match) {
-    if (!currentUserId) {
-      setMessage("You must be logged in to submit a match result.");
+  async function leaveTournament() {
+    if (!tournament) return;
+
+    if (!userId) {
+      router.push("/login");
       return;
     }
 
-    if (!tournament) {
-      setMessage("Tournament not found.");
+    if (!userJoined) {
+      setMessage("You have not joined this tournament.");
       return;
     }
 
-    if (!canSubmitReport(match)) {
-      setMessage("You cannot submit a report for this match.");
+    if (bracketGenerated) {
+      setMessage(
+        "You cannot leave after the bracket has been generated. Contact an admin if you need help."
+      );
       return;
     }
 
-    const form = reportForms[match.id];
+    const confirmed = window.confirm(`Leave "${tournament.name}"?`);
 
-    const player1Score = Number(form?.player1Score);
-    const player2Score = Number(form?.player2Score);
+    if (!confirmed) return;
 
-    if (!Number.isInteger(player1Score) || player1Score < 0) {
-      setMessage("Enter a valid Player 1 score.");
-      return;
-    }
-
-    if (!Number.isInteger(player2Score) || player2Score < 0) {
-      setMessage("Enter a valid Player 2 score.");
-      return;
-    }
-
-    if (player1Score === player2Score) {
-      setMessage("Scores cannot be tied. Enter the final winning score.");
-      return;
-    }
-
-    const reportedWinnerId =
-      player1Score > player2Score ? match.player1_id : match.player2_id;
-
-    if (!reportedWinnerId) {
-      setMessage("Could not determine the reported winner.");
-      return;
-    }
-
-    setSubmittingMatchId(match.id);
+    setLeaving(true);
     setMessage("");
 
-    const { data, error } = await supabase
-      .from("match_reports")
-      .insert({
-        match_id: match.id,
-        tournament_id: tournament.id,
-        submitted_by: currentUserId,
-        player1_score: player1Score,
-        player2_score: player2Score,
-        reported_winner_id: reportedWinnerId,
-        notes: form?.notes?.trim() || null,
-        status: "pending",
-      })
-      .select(
-        "id, match_id, tournament_id, submitted_by, player1_score, player2_score, reported_winner_id, notes, status, created_at"
-      )
-      .single();
+    const { error } = await supabase
+      .from("tournament_players")
+      .delete()
+      .eq("tournament_id", tournament.id)
+      .eq("player_id", userId);
 
     if (error) {
-      setMessage(error.message);
-      setSubmittingMatchId(null);
+      setMessage(`Error leaving tournament: ${error.message}`);
+      setLeaving(false);
       return;
     }
 
-    const newReport = data as MatchReport;
-
-    setReports((currentReports) => [newReport, ...currentReports]);
-
-    setReportForms((currentForms) => ({
-      ...currentForms,
-      [match.id]: {
-        player1Score: "",
-        player2Score: "",
-        notes: "",
-      },
-    }));
-
-    setMessage("Match result submitted for admin review.");
-    setSubmittingMatchId(null);
+    setMessage(`You left "${tournament.name}".`);
+    await loadTournamentDetails();
+    setLeaving(false);
   }
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
+      <main className="min-h-screen bg-black p-6 text-white">
         <div className="mx-auto max-w-6xl">
-          <h1 className="text-3xl font-bold">Tournament Details</h1>
-          <p className="mt-4 text-zinc-400">Loading tournament...</p>
+          <p className="rounded-xl border border-gray-800 bg-gray-950 p-6 text-gray-400">
+            Loading tournament...
+          </p>
         </div>
       </main>
     );
@@ -595,470 +403,414 @@ export default function TournamentDetailsPage() {
 
   if (!tournament) {
     return (
-      <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
+      <main className="min-h-screen bg-black p-6 text-white">
         <div className="mx-auto max-w-6xl">
-          <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-6 text-red-300">
-            {message || "Tournament not found."}
-          </div>
+          <section className="rounded-xl border border-red-900 bg-red-950/40 p-6">
+            <h1 className="mb-2 text-3xl font-black">Tournament Not Found</h1>
 
-          <Link
-            href="/tournaments"
-            className="mt-6 inline-block rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700"
-          >
-            Back to Tournaments
-          </Link>
+            <p className="mb-5 text-red-200">
+              {message || "This tournament could not be loaded."}
+            </p>
+
+            <Link
+              href="/tournaments"
+              className="inline-block rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200"
+            >
+              Back to Tournaments
+            </Link>
+          </section>
         </div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-      <div className="mx-auto max-w-6xl">
-        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <p className="mb-2 text-sm font-bold uppercase tracking-widest text-red-400">
-              Tournament Details
-            </p>
-
-            <h1 className="text-4xl font-bold">{tournament.name}</h1>
-
-            <p className="mt-3 text-zinc-400">
-              Join the tournament, view player spots, check bracket status, and
-              submit match scores.
-            </p>
-          </div>
+    <main className="min-h-screen bg-black p-6 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <Link
+            href="/tournaments"
+            className="text-sm text-gray-400 hover:text-white"
+          >
+            ← Back to Tournaments
+          </Link>
 
           <div className="flex flex-col gap-3 sm:flex-row">
             <Link
-              href="/tournaments"
-              className="rounded-lg border border-zinc-700 px-4 py-2 text-center font-semibold text-white hover:bg-zinc-800"
+              href={`/brackets?tournament=${tournament.id}`}
+              className="text-sm text-gray-400 hover:text-white"
             >
-              Browse Tournaments
+              View Bracket →
             </Link>
 
-            <Link
-              href="/brackets"
-              className="rounded-lg bg-red-600 px-4 py-2 text-center font-semibold text-white hover:bg-red-700"
-            >
-              View Brackets
-            </Link>
-          </div>
-        </div>
-
-        {message && (
-          <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-red-300">
-            {message}
-          </div>
-        )}
-
-        {currentUserId && !profileIsComplete && (
-          <div className="mb-6 rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-4 text-yellow-100">
-            <p className="font-semibold">Profile required</p>
-
-            <p className="mt-1 text-sm">
-              Add your gamer tag and platform before joining tournaments.
-            </p>
-
-            <Link
-              href="/profile"
-              className="mt-4 inline-block rounded-lg bg-red-600 px-4 py-2 font-semibold text-white hover:bg-red-700"
-            >
-              Complete Profile
-            </Link>
-          </div>
-        )}
-
-        <div className="grid gap-8 lg:grid-cols-[1.4fr_0.8fr]">
-          <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <h2 className="text-2xl font-bold">Tournament Info</h2>
-
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Game</p>
-                <p className="mt-1 font-semibold">
-                  {tournament.game || "Not set"}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Platform</p>
-                <p className="mt-1 font-semibold">
-                  {tournament.platform || "Not set"}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Prize Pool</p>
-                <p className="mt-1 font-semibold">
-                  {tournament.prize_pool !== null
-                    ? `$${tournament.prize_pool}`
-                    : "Not set"}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Entry Fee</p>
-                <p className="mt-1 font-semibold">
-                  {tournament.entry_fee !== null
-                    ? `$${tournament.entry_fee}`
-                    : "Free / Not set"}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Players</p>
-                <p className="mt-1 font-semibold">
-                  {spotsTaken}
-                  {maxPlayers !== null ? ` / ${maxPlayers}` : ""}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Bracket</p>
-                <p
-                  className={`mt-1 font-semibold ${
-                    bracketGenerated ? "text-green-300" : "text-yellow-300"
-                  }`}
-                >
-                  {bracketGenerated ? "Generated" : "Not generated yet"}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-              {!currentUserId ? (
-                <Link
-                  href="/login"
-                  className="rounded-lg bg-red-600 px-5 py-3 text-center font-semibold text-white hover:bg-red-700"
-                >
-                  Login to Join
-                </Link>
-              ) : !profileIsComplete ? (
-                <Link
-                  href="/profile"
-                  className="rounded-lg bg-red-600 px-5 py-3 text-center font-semibold text-white hover:bg-red-700"
-                >
-                  Complete Profile to Join
-                </Link>
-              ) : (
-                <button
-                  onClick={joinTournament}
-                  disabled={joining || isJoined || tournamentIsFull}
-                  className="rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {joining
-                    ? "Joining..."
-                    : isJoined
-                    ? "Already Joined"
-                    : tournamentIsFull
-                    ? "Tournament Full"
-                    : "Join Tournament"}
-                </button>
-              )}
-
+            {userJoined && (
               <Link
                 href="/my-tournaments"
-                className="rounded-lg border border-zinc-700 px-5 py-3 text-center font-semibold text-white hover:bg-zinc-800"
+                className="text-sm text-gray-400 hover:text-white"
               >
-                My Tournaments
+                My Tournaments →
               </Link>
-            </div>
-          </section>
+            )}
 
-          <aside className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <h2 className="text-2xl font-bold">Status</h2>
-
-            <div className="mt-5 space-y-4">
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Spots Taken</p>
-                <p className="mt-1 text-2xl font-bold">{spotsTaken}</p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Spots Remaining</p>
-                <p className="mt-1 text-2xl font-bold">
-                  {spotsRemaining !== null ? spotsRemaining : "Unlimited"}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Matches Created</p>
-                <p className="mt-1 text-2xl font-bold">{matches.length}</p>
-              </div>
-
-              <div className="rounded-lg bg-zinc-950 p-4">
-                <p className="text-sm text-zinc-500">Score Reports</p>
-                <p className="mt-1 text-2xl font-bold">{reports.length}</p>
-              </div>
-            </div>
-          </aside>
+            {isAdmin && (
+              <Link
+                href={`/admin/tournaments/${tournament.id}`}
+                className="text-sm text-red-400 hover:text-red-300"
+              >
+                Admin Edit →
+              </Link>
+            )}
+          </div>
         </div>
 
-        {isJoined && bracketGenerated && (
-          <section className="mt-8 rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <h2 className="text-2xl font-bold">My Match Results</h2>
-
-            <p className="mt-2 text-zinc-400">
-              Submit your match score after playing. Admin will review and
-              approve the result.
-            </p>
-
-            {myMatches.length === 0 && (
-              <div className="mt-6 rounded-lg border border-zinc-800 bg-zinc-950 p-5 text-zinc-400">
-                You do not have a match assigned yet.
-              </div>
-            )}
-
-            {myMatches.length > 0 && (
-              <div className="mt-6 grid gap-5 lg:grid-cols-2">
-                {myMatches.map((match) => {
-                  const matchReports = reportsByMatch[match.id] || [];
-                  const myReport = matchReports.find(
-                    (report) =>
-                      report.submitted_by === currentUserId &&
-                      report.status !== "rejected"
-                  );
-
-                  const reportForm = reportForms[match.id] || {
-                    player1Score: "",
-                    player2Score: "",
-                    notes: "",
-                  };
-
-                  return (
-                    <article
-                      key={match.id}
-                      className="rounded-xl border border-zinc-800 bg-zinc-950 p-5"
-                    >
-                      <div className="mb-4 flex items-start justify-between gap-4">
-                        <div>
-                          <p className="text-sm font-bold uppercase tracking-widest text-red-400">
-                            Round {match.round || 1}
-                          </p>
-
-                          <h3 className="mt-2 text-xl font-bold">
-                            Match {match.match_number || "?"}
-                          </h3>
-                        </div>
-
-                        {match.winner_id ? (
-                          <span className="rounded-full bg-green-500/10 px-3 py-1 text-xs font-bold text-green-300">
-                            Complete
-                          </span>
-                        ) : myReport ? (
-                          <span className="rounded-full bg-yellow-500/10 px-3 py-1 text-xs font-bold text-yellow-300">
-                            Report Pending
-                          </span>
-                        ) : (
-                          <span className="rounded-full bg-red-500/10 px-3 py-1 text-xs font-bold text-red-300">
-                            Needs Report
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="space-y-3">
-                        <div
-                          className={`rounded-lg border p-4 ${
-                            match.winner_id === match.player1_id
-                              ? "border-green-500/40 bg-green-500/10"
-                              : "border-zinc-800 bg-zinc-900"
-                          }`}
-                        >
-                          <p className="font-bold">
-                            {getPlayerName(match.player1_id)}
-                          </p>
-                          <p className="mt-1 text-sm text-zinc-500">
-                            {getPlayerPlatform(match.player1_id)}
-                          </p>
-                        </div>
-
-                        <div className="text-center text-xs font-black uppercase text-zinc-500">
-                          vs
-                        </div>
-
-                        <div
-                          className={`rounded-lg border p-4 ${
-                            match.winner_id === match.player2_id
-                              ? "border-green-500/40 bg-green-500/10"
-                              : "border-zinc-800 bg-zinc-900"
-                          }`}
-                        >
-                          <p className="font-bold">
-                            {getPlayerName(match.player2_id)}
-                          </p>
-                          <p className="mt-1 text-sm text-zinc-500">
-                            {getPlayerPlatform(match.player2_id)}
-                          </p>
-                        </div>
-                      </div>
-
-                      {match.winner_id && (
-                        <div className="mt-5 rounded-lg border border-green-500/40 bg-green-500/10 p-4">
-                          <p className="text-sm text-green-200">Winner</p>
-                          <p className="mt-1 text-lg font-bold text-green-300">
-                            {getPlayerName(match.winner_id)}
-                          </p>
-                        </div>
-                      )}
-
-                      {!match.winner_id && myReport && (
-                        <div className="mt-5 rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-4">
-                          <p className="font-semibold text-yellow-100">
-                            Report submitted
-                          </p>
-
-                          <p className="mt-2 text-sm text-yellow-100/80">
-                            Score: {myReport.player1_score} -{" "}
-                            {myReport.player2_score}
-                          </p>
-
-                          <p className="mt-1 text-sm text-yellow-100/80">
-                            Reported Winner:{" "}
-                            {getPlayerName(myReport.reported_winner_id)}
-                          </p>
-
-                          <p className="mt-1 text-sm text-yellow-100/80">
-                            Status: {myReport.status}
-                          </p>
-                        </div>
-                      )}
-
-                      {canSubmitReport(match) && (
-                        <div className="mt-5 space-y-4">
-                          <div className="grid gap-4 sm:grid-cols-2">
-                            <div>
-                              <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                                {getPlayerName(match.player1_id)} Score
-                              </label>
-
-                              <input
-                                value={reportForm.player1Score}
-                                onChange={(event) =>
-                                  updateReportForm(
-                                    match.id,
-                                    "player1Score",
-                                    event.target.value
-                                  )
-                                }
-                                inputMode="numeric"
-                                placeholder="0"
-                                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-white outline-none focus:border-red-500"
-                              />
-                            </div>
-
-                            <div>
-                              <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                                {getPlayerName(match.player2_id)} Score
-                              </label>
-
-                              <input
-                                value={reportForm.player2Score}
-                                onChange={(event) =>
-                                  updateReportForm(
-                                    match.id,
-                                    "player2Score",
-                                    event.target.value
-                                  )
-                                }
-                                inputMode="numeric"
-                                placeholder="0"
-                                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-white outline-none focus:border-red-500"
-                              />
-                            </div>
-                          </div>
-
-                          <div>
-                            <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                              Notes Optional
-                            </label>
-
-                            <textarea
-                              value={reportForm.notes}
-                              onChange={(event) =>
-                                updateReportForm(
-                                  match.id,
-                                  "notes",
-                                  event.target.value
-                                )
-                              }
-                              placeholder="Example: Final score confirmed in stream chat."
-                              className="min-h-24 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-white outline-none focus:border-red-500"
-                            />
-                          </div>
-
-                          <button
-                            onClick={() => submitMatchReport(match)}
-                            disabled={submittingMatchId === match.id}
-                            className="w-full rounded-lg bg-red-600 px-5 py-3 font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {submittingMatchId === match.id
-                              ? "Submitting..."
-                              : "Submit Match Result"}
-                          </button>
-                        </div>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        )}
-
-        <section className="mt-8 rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <section className="mb-8 rounded-2xl border border-gray-800 bg-gray-950 p-6">
+          <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
             <div>
-              <h2 className="text-2xl font-bold">Joined Players</h2>
-              <p className="mt-1 text-zinc-400">
-                Players currently signed up for this tournament.
+              <p className="mb-3 text-sm font-bold uppercase tracking-[0.25em] text-red-500">
+                BattleGrid Tournament
+              </p>
+
+              <h1 className="mb-3 text-5xl font-black">{tournament.name}</h1>
+
+              <p className="text-gray-400">
+                {tournament.game || "Game not set"} •{" "}
+                {tournament.platform || "Platform not set"}
               </p>
             </div>
 
             <span
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                tournamentIsFull
-                  ? "bg-red-500/10 text-red-300"
-                  : "bg-green-500/10 text-green-300"
-              }`}
+              className={`w-fit rounded-full border px-4 py-2 text-sm font-bold ${registrationStatusClass()}`}
             >
-              {tournamentIsFull ? "Full" : "Open"}
+              {registrationStatusLabel()}
             </span>
           </div>
 
-          {players.length === 0 && (
-            <div className="mt-6 rounded-lg border border-zinc-800 bg-zinc-950 p-5 text-zinc-400">
-              No players have joined yet.
+          <div className="mt-6 grid gap-4 md:grid-cols-4">
+            <div className="rounded-xl border border-gray-800 bg-black p-4">
+              <p className="text-sm text-gray-500">Players</p>
+              <p className="mt-2 text-3xl font-black">
+                {playerCount}/{tournament.max_players || "∞"}
+              </p>
             </div>
-          )}
 
-          {players.length > 0 && (
-            <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {players.map((player, index) => (
-                <div
-                  key={player.player_id}
-                  className="rounded-lg border border-zinc-800 bg-zinc-950 p-4"
-                >
-                  <p className="text-sm font-bold text-red-400">
-                    Player {index + 1}
-                  </p>
+            <div className="rounded-xl border border-gray-800 bg-black p-4">
+              <p className="text-sm text-gray-500">Prize Pool</p>
+              <p className="mt-2 text-3xl font-black">
+                ${tournament.prize_pool || 0}
+              </p>
+            </div>
 
-                  <p className="mt-2 text-lg font-semibold">
-                    {getPlayerName(player.player_id)}
-                  </p>
+            <div className="rounded-xl border border-gray-800 bg-black p-4">
+              <p className="text-sm text-gray-500">Entry Fee</p>
+              <p className="mt-2 text-3xl font-black">
+                ${tournament.entry_fee || 0}
+              </p>
+            </div>
 
-                  <p className="mt-1 text-sm text-zinc-500">
-                    {getPlayerPlatform(player.player_id)}
-                  </p>
+            <div className="rounded-xl border border-gray-800 bg-black p-4">
+              <p className="text-sm text-gray-500">Matches</p>
+              <p className="mt-2 text-3xl font-black">{matches.length}</p>
+            </div>
+          </div>
+        </section>
 
-                  <p className="mt-1 text-sm text-zinc-500">
-                    {getPlayerFavoriteTeam(player.player_id)}
+        {message && (
+          <p className="mb-6 rounded-lg border border-yellow-800 bg-yellow-950/30 p-4 text-sm text-yellow-200">
+            {message}
+          </p>
+        )}
+
+        <section className="mb-8 grid gap-6 lg:grid-cols-[1fr_420px]">
+          <div className="grid gap-6">
+            <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+              <h2 className="mb-4 text-2xl font-bold">Tournament Details</h2>
+
+              <div className="grid gap-4 text-sm text-gray-300">
+                <p>
+                  <span className="text-gray-500">Start Time:</span>{" "}
+                  {formatDateTime(tournament.start_time)}
+                </p>
+
+                <p>
+                  <span className="text-gray-500">Created:</span>{" "}
+                  {formatDateTime(tournament.created_at)}
+                </p>
+              </div>
+
+              <div className="mt-6">
+                <h3 className="mb-2 text-lg font-bold">Description</h3>
+
+                <p className="whitespace-pre-wrap text-gray-400">
+                  {tournament.description ||
+                    "No description has been added for this tournament yet."}
+                </p>
+              </div>
+
+              <div className="mt-6">
+                <h3 className="mb-2 text-lg font-bold">Rules</h3>
+
+                <p className="whitespace-pre-wrap text-gray-400">
+                  {tournament.rules ||
+                    "No rules have been added for this tournament yet."}
+                </p>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+              <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold">Registered Players</h2>
+
+                  <p className="mt-1 text-sm text-gray-400">
+                    Players currently signed up for this tournament.
                   </p>
                 </div>
+
+                <span className="w-fit rounded-full border border-gray-700 bg-black px-3 py-1 text-xs font-bold text-gray-300">
+                  {playerCount} registered
+                </span>
+              </div>
+
+              {registeredPlayers.length === 0 ? (
+                <p className="rounded-lg border border-gray-800 bg-black p-4 text-gray-400">
+                  No players have joined this tournament yet.
+                </p>
+              ) : (
+                <div className="grid gap-3 md:grid-cols-2">
+                  {registeredPlayers.map(({ row, profile }, index) => (
+                    <Link
+                      key={row.player_id}
+                      href={`/players/${row.player_id}`}
+                      className="rounded-xl border border-gray-800 bg-black p-4 hover:border-red-700 hover:bg-red-950/20"
+                    >
+                      <p className="font-bold">
+                        {index + 1}. {profile?.gamer_tag || "Unnamed Player"}
+                      </p>
+
+                      <p className="mt-1 text-sm text-gray-500">
+                        {profile?.platform || "Platform not set"} •{" "}
+                        {profile?.favorite_team || "Favorite team not set"}
+                      </p>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+
+          <aside className="grid h-fit gap-6">
+            <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+              <h2 className="mb-4 text-2xl font-bold">Registration</h2>
+
+              {!userId ? (
+                <>
+                  <p className="mb-5 text-sm text-gray-400">
+                    Log in or create an account to join this tournament.
+                  </p>
+
+                  <div className="grid gap-3">
+                    <Link
+                      href="/login"
+                      className="rounded-lg bg-white px-5 py-3 text-center font-bold text-black hover:bg-gray-200"
+                    >
+                      Login
+                    </Link>
+
+                    <Link
+                      href="/signup"
+                      className="rounded-lg border border-gray-700 px-5 py-3 text-center font-bold text-white hover:bg-gray-900"
+                    >
+                      Sign Up
+                    </Link>
+                  </div>
+                </>
+              ) : userJoined ? (
+                <>
+                  <p className="mb-5 rounded-lg border border-green-800 bg-green-950/20 p-4 text-sm text-green-300">
+                    You are registered for this tournament.
+                  </p>
+
+                  <div className="grid gap-3">
+                    <Link
+                      href="/my-tournaments"
+                      className="rounded-lg bg-white px-5 py-3 text-center font-bold text-black hover:bg-gray-200"
+                    >
+                      View My Matches
+                    </Link>
+
+                    <button
+                      type="button"
+                      onClick={leaveTournament}
+                      disabled={leaving || bracketGenerated}
+                      className="rounded-lg border border-red-800 px-5 py-3 font-bold text-red-300 hover:bg-red-950/40 disabled:opacity-50"
+                    >
+                      {leaving
+                        ? "Leaving..."
+                        : bracketGenerated
+                          ? "Locked"
+                          : "Leave Tournament"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="mb-5 text-sm text-gray-400">
+                    Join before registration closes or the bracket is generated.
+                  </p>
+
+                  <button
+                    type="button"
+                    onClick={joinTournament}
+                    disabled={joining || !canJoin()}
+                    className="w-full rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200 disabled:opacity-50"
+                  >
+                    {joining ? "Joining..." : "Join Tournament"}
+                  </button>
+
+                  {!canJoin() && (
+                    <p className="mt-3 text-sm text-gray-500">
+                      Joining is unavailable because registration is closed,
+                      full, or bracket locked.
+                    </p>
+                  )}
+                </>
+              )}
+            </section>
+
+            <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+              <h2 className="mb-4 text-2xl font-bold">Bracket Status</h2>
+
+              {bracketGenerated ? (
+                <>
+                  <div className="mb-4 grid gap-3">
+                    <div className="rounded-lg border border-gray-800 bg-black p-4">
+                      <p className="text-sm text-gray-500">Completed Matches</p>
+                      <p className="mt-1 text-3xl font-black">
+                        {completedMatches}/{matches.length}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-800 bg-black p-4">
+                      <p className="text-sm text-gray-500">Pending Reviews</p>
+                      <p className="mt-1 text-3xl font-black">
+                        {pendingReviewMatches}
+                      </p>
+                    </div>
+                  </div>
+
+                  <Link
+                    href={`/brackets?tournament=${tournament.id}`}
+                    className="block rounded-lg bg-white px-5 py-3 text-center font-bold text-black hover:bg-gray-200"
+                  >
+                    View Full Bracket
+                  </Link>
+                </>
+              ) : (
+                <p className="rounded-lg border border-gray-800 bg-black p-4 text-sm text-gray-400">
+                  The bracket has not been generated yet. It will appear after
+                  registration is ready.
+                </p>
+              )}
+            </section>
+
+            {isAdmin && (
+              <section className="rounded-xl border border-red-900 bg-red-950/10 p-6">
+                <h2 className="mb-4 text-2xl font-bold text-red-200">
+                  Admin Tools
+                </h2>
+
+                <div className="grid gap-3">
+                  <Link
+                    href={`/admin/tournaments/${tournament.id}`}
+                    className="rounded-lg bg-white px-5 py-3 text-center font-bold text-black hover:bg-gray-200"
+                  >
+                    Edit Tournament
+                  </Link>
+
+                  <Link
+                    href="/admin/tournaments"
+                    className="rounded-lg border border-red-800 px-5 py-3 text-center font-bold text-red-300 hover:bg-red-950/40"
+                  >
+                    Manage Bracket
+                  </Link>
+
+                  <Link
+                    href="/admin/reviews"
+                    className="rounded-lg border border-red-800 px-5 py-3 text-center font-bold text-red-300 hover:bg-red-950/40"
+                  >
+                    Score Reviews
+                  </Link>
+                </div>
+              </section>
+            )}
+          </aside>
+        </section>
+
+        {matches.length > 0 && (
+          <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+            <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <div>
+                <h2 className="text-2xl font-bold">Match Preview</h2>
+
+                <p className="mt-1 text-sm text-gray-400">
+                  Quick look at current bracket matchups.
+                </p>
+              </div>
+
+              <Link
+                href={`/brackets?tournament=${tournament.id}`}
+                className="rounded-lg border border-gray-700 px-5 py-3 text-center text-sm font-bold text-white hover:bg-gray-900"
+              >
+                Open Bracket
+              </Link>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {matches.slice(0, 6).map((match) => (
+                <article
+                  key={match.id}
+                  className="rounded-xl border border-gray-800 bg-black p-4"
+                >
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <h3 className="font-bold">
+                      Round {match.round}, Match {match.match_number}
+                    </h3>
+
+                    <span
+                      className={`rounded-full border px-3 py-1 text-xs font-bold ${
+                        match.status === "completed"
+                          ? "border-green-700 bg-green-950/40 text-green-300"
+                          : match.score_submitted_by
+                            ? "border-yellow-700 bg-yellow-950/40 text-yellow-300"
+                            : "border-gray-700 bg-gray-950 text-gray-300"
+                      }`}
+                    >
+                      {match.status === "completed"
+                        ? "Completed"
+                        : match.score_submitted_by
+                          ? "Pending Review"
+                          : "Pending"}
+                    </span>
+                  </div>
+
+                  <p className="text-sm text-gray-300">
+                    {playerName(match.player1_id)} vs {playerName(match.player2_id)}
+                  </p>
+
+                  <p className="mt-2 text-sm text-gray-500">
+                    Score: {scoreText(match)}
+                  </p>
+
+                  {match.winner_id && (
+                    <p className="mt-2 text-sm font-bold text-green-300">
+                      Winner: {playerName(match.winner_id)}
+                    </p>
+                  )}
+                </article>
               ))}
             </div>
-          )}
-        </section>
+          </section>
+        )}
       </div>
     </main>
   );

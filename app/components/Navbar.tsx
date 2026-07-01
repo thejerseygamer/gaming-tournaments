@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "../lib/supabase";
+import { checkIsAdmin } from "../lib/admin";
 
 type NavLink = {
   href: string;
   label: string;
+  adminOnly?: boolean;
+  authOnly?: boolean;
 };
 
 const mainLinks: NavLink[] = [
@@ -20,78 +23,167 @@ const mainLinks: NavLink[] = [
     label: "Tournaments",
   },
   {
-    href: "/my-tournaments",
-    label: "My Tournaments",
-  },
-  {
     href: "/brackets",
     label: "Brackets",
   },
   {
+    href: "/leaderboard",
+    label: "Leaderboard",
+  },
+  {
+    href: "/help",
+    label: "Help",
+  },
+  {
+    href: "/my-tournaments",
+    label: "My Tournaments",
+    authOnly: true,
+  },
+  {
     href: "/profile",
     label: "Profile",
+    authOnly: true,
   },
-];
-
-const adminLinks: NavLink[] = [
+  {
+    href: "/account/security",
+    label: "Security",
+    authOnly: true,
+  },
   {
     href: "/admin",
     label: "Admin",
-  },
-  {
-    href: "/admin/tournaments",
-    label: "Manage Tournaments",
-  },
-  {
-    href: "/admin/players",
-    label: "Players",
-  },
-  {
-    href: "/admin/reviews",
-    label: "Reviews",
+    adminOnly: true,
   },
 ];
 
 export default function Navbar() {
   const pathname = usePathname();
+  const router = useRouter();
 
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [userId, setUserId] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [loadingUser, setLoadingUser] = useState(true);
   const [signingOut, setSigningOut] = useState(false);
 
-  useEffect(() => {
-    let active = true;
+  const isLoggedIn = Boolean(userEmail);
 
-    async function loadUser() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+  const loadNavbar = useCallback(async () => {
+    const adminCheck = await checkIsAdmin();
 
-      if (!active) {
-        return;
-      }
+    const currentUserId = adminCheck.user?.id || "";
+    const currentEmail = adminCheck.user?.email || "";
 
-      setUserEmail(user?.email || null);
-      setLoadingUser(false);
+    setUserId(currentUserId);
+    setUserEmail(currentEmail);
+    setIsAdmin(Boolean(adminCheck.isAdmin));
+
+    if (currentUserId) {
+      const { count } = await supabase
+        .from("notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", currentUserId)
+        .is("read_at", null);
+
+      setUnreadCount(count || 0);
+    } else {
+      setUnreadCount(0);
     }
 
-    loadUser();
+    setLoadingUser(false);
+  }, []);
 
+  const refreshUnreadCount = useCallback(async () => {
+    if (!userId) {
+      setUnreadCount(0);
+      return;
+    }
+
+    const { count } = await supabase
+      .from("notifications")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .is("read_at", null);
+
+    setUnreadCount(count || 0);
+  }, [userId]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void loadNavbar();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [loadNavbar]);
+
+  useEffect(() => {
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserEmail(session?.user?.email || null);
-      setLoadingUser(false);
+    } = supabase.auth.onAuthStateChange(() => {
+      window.setTimeout(() => {
+        void loadNavbar();
+      }, 0);
     });
 
     return () => {
-      active = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, [loadNavbar]);
 
-  function isActive(href: string) {
+  useEffect(() => {
+    if (!userId) return;
+
+    const intervalId = window.setInterval(() => {
+      void refreshUnreadCount();
+    }, 15000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [refreshUnreadCount, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+
+    const channel = supabase
+      .channel(`navbar-notifications-${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "notifications",
+          filter: `user_id=eq.${userId}`,
+        },
+        () => {
+          void refreshUnreadCount();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [refreshUnreadCount, userId]);
+
+  const visibleLinks = useMemo(() => {
+    return mainLinks.filter((link) => {
+      if (link.adminOnly && !isAdmin) return false;
+      if (link.authOnly && !isLoggedIn) return false;
+
+      return true;
+    });
+  }, [isAdmin, isLoggedIn]);
+
+  function closeMenu() {
+    setMenuOpen(false);
+  }
+
+  function isActiveLink(href: string) {
     if (href === "/") {
       return pathname === "/";
     }
@@ -99,73 +191,92 @@ export default function Navbar() {
     return pathname === href || pathname.startsWith(`${href}/`);
   }
 
-  async function handleSignOut() {
+  async function signOut() {
     setSigningOut(true);
 
     const { error } = await supabase.auth.signOut();
 
     if (error) {
       setSigningOut(false);
-      alert(error.message);
       return;
     }
 
-    setUserEmail(null);
-    setMobileOpen(false);
-    window.location.href = "/login";
-  }
+    setUserId("");
+    setUserEmail("");
+    setIsAdmin(false);
+    setUnreadCount(0);
+    setMenuOpen(false);
+    setSigningOut(false);
 
-  function linkClass(href: string) {
-    return `rounded-lg px-3 py-2 text-sm font-semibold transition ${
-      isActive(href)
-        ? "bg-red-600 text-white"
-        : "text-zinc-300 hover:bg-zinc-800 hover:text-white"
-    }`;
+    router.push("/login");
+    router.refresh();
   }
 
   return (
-    <header className="sticky top-0 z-50 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
-      <nav className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4 text-white">
-        <Link href="/" className="flex items-center gap-2">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-red-600 font-black">
+    <header className="sticky top-0 z-50 border-b border-gray-800 bg-black/90 text-white backdrop-blur">
+      <nav className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-4">
+        <Link href="/" onClick={closeMenu} className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-700 bg-red-950/40 font-black text-red-300">
             BG
           </div>
 
           <div>
             <p className="text-lg font-black leading-none">BattleGrid</p>
-            <p className="text-xs text-zinc-500">Gaming Tournaments</p>
+            <p className="text-xs uppercase tracking-[0.2em] text-gray-500">
+              Tournaments
+            </p>
           </div>
         </Link>
 
-        <div className="hidden items-center gap-2 lg:flex">
-          {mainLinks.map((link) => (
-            <Link key={link.href} href={link.href} className={linkClass(link.href)}>
+        <div className="hidden items-center gap-2 xl:flex">
+          {visibleLinks.map((link) => (
+            <Link
+              key={link.href}
+              href={link.href}
+              className={`rounded-lg px-3 py-2 text-sm font-bold ${
+                isActiveLink(link.href)
+                  ? "bg-red-950/50 text-red-300"
+                  : "text-gray-300 hover:bg-gray-900 hover:text-white"
+              }`}
+            >
               {link.label}
             </Link>
           ))}
 
-          <div className="mx-2 h-6 w-px bg-zinc-800" />
+          {isLoggedIn && (
+            <Link
+              href="/notifications"
+              className={`relative rounded-lg px-3 py-2 text-sm font-bold ${
+                isActiveLink("/notifications")
+                  ? "bg-red-950/50 text-red-300"
+                  : "text-gray-300 hover:bg-gray-900 hover:text-white"
+              }`}
+            >
+              Notifications
 
-          {adminLinks.map((link) => (
-            <Link key={link.href} href={link.href} className={linkClass(link.href)}>
-              {link.label}
+              {unreadCount > 0 && (
+                <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-black text-white">
+                  {unreadCount}
+                </span>
+              )}
             </Link>
-          ))}
+          )}
         </div>
 
-        <div className="hidden items-center gap-3 lg:flex">
+        <div className="hidden items-center gap-3 xl:flex">
           {loadingUser ? (
-            <span className="text-sm text-zinc-500">Checking login...</span>
-          ) : userEmail ? (
+            <span className="text-sm text-gray-500">Loading...</span>
+          ) : isLoggedIn ? (
             <>
-              <span className="max-w-48 truncate text-sm text-zinc-400">
+              <span className="max-w-48 truncate text-sm text-gray-500">
                 {userEmail}
               </span>
 
               <button
-                onClick={handleSignOut}
+                type="button"
+                onClick={signOut}
                 disabled={signingOut}
-                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-bold text-white hover:bg-gray-900 disabled:opacity-50"
               >
                 {signingOut ? "Signing Out..." : "Sign Out"}
               </button>
@@ -174,14 +285,16 @@ export default function Navbar() {
             <>
               <Link
                 href="/login"
-                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
+                onClick={closeMenu}
+                className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-bold text-white hover:bg-gray-900"
               >
                 Login
               </Link>
 
               <Link
                 href="/signup"
-                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
+                onClick={closeMenu}
+                className="rounded-lg bg-white px-4 py-2 text-sm font-bold text-black hover:bg-gray-200"
               >
                 Sign Up
               </Link>
@@ -190,81 +303,92 @@ export default function Navbar() {
         </div>
 
         <button
-          onClick={() => setMobileOpen((currentValue) => !currentValue)}
-          className="rounded-lg border border-zinc-700 px-3 py-2 text-sm font-semibold text-white hover:bg-zinc-800 lg:hidden"
+          type="button"
+          onClick={() => setMenuOpen((currentValue) => !currentValue)}
+          className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-bold text-white hover:bg-gray-900 xl:hidden"
         >
-          {mobileOpen ? "Close" : "Menu"}
+          {menuOpen ? "Close" : "Menu"}
         </button>
       </nav>
 
-      {mobileOpen && (
-        <div className="border-t border-zinc-800 bg-zinc-950 px-6 py-4 text-white lg:hidden">
-          <div className="grid gap-2">
-            {mainLinks.map((link) => (
+      {menuOpen && (
+        <section className="border-t border-gray-800 bg-black px-6 py-4 xl:hidden">
+          <div className="mx-auto grid max-w-7xl gap-2">
+            {visibleLinks.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
-                onClick={() => setMobileOpen(false)}
-                className={linkClass(link.href)}
+                onClick={closeMenu}
+                className={`rounded-lg px-3 py-3 text-sm font-bold ${
+                  isActiveLink(link.href)
+                    ? "bg-red-950/50 text-red-300"
+                    : "text-gray-300 hover:bg-gray-900 hover:text-white"
+                }`}
               >
                 {link.label}
               </Link>
             ))}
 
-            <div className="my-2 h-px bg-zinc-800" />
-
-            {adminLinks.map((link) => (
+            {isLoggedIn && (
               <Link
-                key={link.href}
-                href={link.href}
-                onClick={() => setMobileOpen(false)}
-                className={linkClass(link.href)}
+                href="/notifications"
+                onClick={closeMenu}
+                className={`rounded-lg px-3 py-3 text-sm font-bold ${
+                  isActiveLink("/notifications")
+                    ? "bg-red-950/50 text-red-300"
+                    : "text-gray-300 hover:bg-gray-900 hover:text-white"
+                }`}
               >
-                {link.label}
+                Notifications
+
+                {unreadCount > 0 && (
+                  <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-black text-white">
+                    {unreadCount}
+                  </span>
+                )}
               </Link>
-            ))}
-
-            <div className="my-2 h-px bg-zinc-800" />
-
-            {loadingUser ? (
-              <p className="px-3 py-2 text-sm text-zinc-500">
-                Checking login...
-              </p>
-            ) : userEmail ? (
-              <div className="grid gap-2">
-                <p className="truncate px-3 py-2 text-sm text-zinc-400">
-                  {userEmail}
-                </p>
-
-                <button
-                  onClick={handleSignOut}
-                  disabled={signingOut}
-                  className="rounded-lg border border-zinc-700 px-4 py-2 text-left text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {signingOut ? "Signing Out..." : "Sign Out"}
-                </button>
-              </div>
-            ) : (
-              <div className="grid gap-2">
-                <Link
-                  href="/login"
-                  onClick={() => setMobileOpen(false)}
-                  className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
-                >
-                  Login
-                </Link>
-
-                <Link
-                  href="/signup"
-                  onClick={() => setMobileOpen(false)}
-                  className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
-                >
-                  Sign Up
-                </Link>
-              </div>
             )}
+
+            <div className="mt-3 border-t border-gray-800 pt-3">
+              {loadingUser ? (
+                <p className="px-3 py-3 text-sm text-gray-500">Loading...</p>
+              ) : isLoggedIn ? (
+                <div className="grid gap-3">
+                  <p className="truncate px-3 text-sm text-gray-500">
+                    {userEmail}
+                  </p>
+
+                  <button
+                    type="button"
+                    onClick={signOut}
+                    disabled={signingOut}
+                    className="rounded-lg border border-gray-700 px-4 py-3 text-sm font-bold text-white hover:bg-gray-900 disabled:opacity-50"
+                  >
+                    {signingOut ? "Signing Out..." : "Sign Out"}
+                  </button>
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Link
+                    href="/login"
+                    onClick={closeMenu}
+                    className="rounded-lg border border-gray-700 px-4 py-3 text-center text-sm font-bold text-white hover:bg-gray-900"
+                  >
+                    Login
+                  </Link>
+
+                  <Link
+                    href="/signup"
+                    onClick={closeMenu}
+                    className="rounded-lg bg-white px-4 py-3 text-center text-sm font-bold text-black hover:bg-gray-200"
+                  >
+                    Sign Up
+                  </Link>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        </section>
       )}
     </header>
   );

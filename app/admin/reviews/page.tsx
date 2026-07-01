@@ -1,854 +1,764 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabase";
-
-type Match = {
-  id: string;
-  tournament_id: string;
-  round: number | null;
-  match_number: number | null;
-  player1_id: string | null;
-  player2_id: string | null;
-  winner_id: string | null;
-};
+import { checkIsAdmin } from "../../lib/admin";
 
 type Tournament = {
   id: string;
   name: string;
   game: string | null;
   platform: string | null;
+  start_time: string | null;
 };
 
-type Profile = {
+type PlayerProfile = {
   id: string;
   gamer_tag: string | null;
   platform: string | null;
   favorite_team: string | null;
 };
 
-type MatchReport = {
+type Match = {
   id: string;
-  match_id: string;
-  tournament_id: string;
-  submitted_by: string;
-  player1_score: number;
-  player2_score: number;
-  reported_winner_id: string;
-  notes: string | null;
-  status: "pending" | "approved" | "rejected";
-  created_at: string | null;
-};
-
-type ReviewFilter = "all" | "pending" | "approved" | "rejected";
-
-type NewMatch = {
   tournament_id: string;
   round: number;
   match_number: number;
   player1_id: string | null;
   player2_id: string | null;
   winner_id: string | null;
+  status: string | null;
+  player1_score: number | null;
+  player2_score: number | null;
+  score_submitted_by: string | null;
+  score_submitted_at: string | null;
+  score_proof_path: string | null;
+  created_at: string;
 };
 
+type ReviewEdit = {
+  winner_id: string;
+};
+
+function formatDateTime(value: string | null) {
+  if (!value) return "Not set";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "Not set";
+
+  return date.toLocaleString();
+}
+
+function scoreText(match: Match) {
+  if (
+    match.player1_score === null ||
+    match.player1_score === undefined ||
+    match.player2_score === null ||
+    match.player2_score === undefined
+  ) {
+    return "No score submitted";
+  }
+
+  return `${match.player1_score} - ${match.player2_score}`;
+}
+
+function suggestedWinnerId(match: Match) {
+  if (
+    match.player1_score === null ||
+    match.player1_score === undefined ||
+    match.player2_score === null ||
+    match.player2_score === undefined
+  ) {
+    return "";
+  }
+
+  if (match.player1_score > match.player2_score) {
+    return match.player1_id || "";
+  }
+
+  if (match.player2_score > match.player1_score) {
+    return match.player2_id || "";
+  }
+
+  return "";
+}
+
+function buildReviewEdits(matches: Match[]) {
+  return matches.reduce((acc, match) => {
+    acc[match.id] = {
+      winner_id: suggestedWinnerId(match),
+    };
+
+    return acc;
+  }, {} as Record<string, ReviewEdit>);
+}
+
 export default function AdminReviewsPage() {
-  const [reports, setReports] = useState<MatchReport[]>([]);
-  const [matches, setMatches] = useState<Record<string, Match>>({});
-  const [tournaments, setTournaments] = useState<Record<string, Tournament>>({});
-  const [profiles, setProfiles] = useState<Record<string, Profile>>({});
-  const [searchText, setSearchText] = useState("");
-  const [filter, setFilter] = useState<ReviewFilter>("pending");
+  const router = useRouter();
+
+  const [checkingAdmin, setCheckingAdmin] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const [reviews, setReviews] = useState<Match[]>([]);
+  const [allTournamentMatches, setAllTournamentMatches] = useState<Match[]>([]);
+  const [tournamentsById, setTournamentsById] = useState<
+    Record<string, Tournament>
+  >({});
+  const [profilesById, setProfilesById] = useState<
+    Record<string, PlayerProfile>
+  >({});
+  const [reviewEdits, setReviewEdits] = useState<Record<string, ReviewEdit>>(
+    {}
+  );
 
   const [loading, setLoading] = useState(true);
-  const [reviewingReportId, setReviewingReportId] = useState<string | null>(
-    null
-  );
+  const [approvingId, setApprovingId] = useState("");
+  const [dismissingId, setDismissingId] = useState("");
   const [message, setMessage] = useState("");
 
-  const getPlayerName = useCallback(
-    (playerId: string | null) => {
-      if (!playerId) {
-        return "Waiting for player";
+  const loadReviews = useCallback(async () => {
+    setCheckingAdmin(true);
+    setLoading(true);
+    setMessage("");
+
+    const adminCheck = await checkIsAdmin();
+
+    if (!adminCheck.user) {
+      router.push("/login");
+      return;
+    }
+
+    if (!adminCheck.isAdmin) {
+      router.push("/tournaments");
+      return;
+    }
+
+    setIsAdmin(true);
+    setCheckingAdmin(false);
+
+    const { data: reviewData, error: reviewError } = await supabase
+      .from("matches")
+      .select(
+        "id, tournament_id, round, match_number, player1_id, player2_id, winner_id, status, player1_score, player2_score, score_submitted_by, score_submitted_at, score_proof_path, created_at"
+      )
+      .eq("status", "pending")
+      .not("score_submitted_by", "is", null)
+      .order("score_submitted_at", { ascending: true });
+
+    if (reviewError) {
+      setMessage(`Error loading score reviews: ${reviewError.message}`);
+      setReviews([]);
+      setAllTournamentMatches([]);
+      setTournamentsById({});
+      setProfilesById({});
+      setReviewEdits({});
+      setLoading(false);
+      return;
+    }
+
+    const loadedReviews = (reviewData || []) as Match[];
+
+    setReviews(loadedReviews);
+    setReviewEdits(buildReviewEdits(loadedReviews));
+
+    if (loadedReviews.length === 0) {
+      setAllTournamentMatches([]);
+      setTournamentsById({});
+      setProfilesById({});
+      setLoading(false);
+      return;
+    }
+
+    const tournamentIds = Array.from(
+      new Set(loadedReviews.map((match) => match.tournament_id))
+    );
+
+    const { data: tournamentData, error: tournamentError } = await supabase
+      .from("tournaments")
+      .select("id, name, game, platform, start_time")
+      .in("id", tournamentIds);
+
+    if (tournamentError) {
+      setMessage(`Error loading tournaments: ${tournamentError.message}`);
+      setTournamentsById({});
+    } else {
+      const tournamentMap = ((tournamentData || []) as Tournament[]).reduce(
+        (acc, tournament) => {
+          acc[tournament.id] = tournament;
+          return acc;
+        },
+        {} as Record<string, Tournament>
+      );
+
+      setTournamentsById(tournamentMap);
+    }
+
+    const { data: matchData, error: matchError } = await supabase
+      .from("matches")
+      .select(
+        "id, tournament_id, round, match_number, player1_id, player2_id, winner_id, status, player1_score, player2_score, score_submitted_by, score_submitted_at, score_proof_path, created_at"
+      )
+      .in("tournament_id", tournamentIds)
+      .order("round", { ascending: true })
+      .order("match_number", { ascending: true });
+
+    if (matchError) {
+      setMessage(`Error loading bracket matches: ${matchError.message}`);
+      setAllTournamentMatches([]);
+    } else {
+      setAllTournamentMatches((matchData || []) as Match[]);
+    }
+
+    const profileIds = Array.from(
+      new Set(
+        loadedReviews
+          .flatMap((match) => [
+            match.player1_id,
+            match.player2_id,
+            match.score_submitted_by,
+          ])
+          .filter((id): id is string => Boolean(id))
+      )
+    );
+
+    if (profileIds.length > 0) {
+      const { data: profileData, error: profileError } = await supabase
+        .from("profiles")
+        .select("id, gamer_tag, platform, favorite_team")
+        .in("id", profileIds);
+
+      if (profileError) {
+        setMessage(`Error loading player names: ${profileError.message}`);
+        setProfilesById({});
+      } else {
+        const profileMap = ((profileData || []) as PlayerProfile[]).reduce(
+          (acc, profile) => {
+            acc[profile.id] = profile;
+            return acc;
+          },
+          {} as Record<string, PlayerProfile>
+        );
+
+        setProfilesById(profileMap);
       }
+    } else {
+      setProfilesById({});
+    }
 
-      const profile = profiles[playerId];
-
-      if (profile?.gamer_tag) {
-        return profile.gamer_tag;
-      }
-
-      return "Unknown Player";
-    },
-    [profiles]
-  );
-
-  const getPlayerPlatform = useCallback(
-    (playerId: string | null) => {
-      if (!playerId) {
-        return "Platform not set";
-      }
-
-      return profiles[playerId]?.platform || "Platform not set";
-    },
-    [profiles]
-  );
-
-  const getTournamentName = useCallback(
-    (tournamentId: string) => {
-      return tournaments[tournamentId]?.name || "Unknown Tournament";
-    },
-    [tournaments]
-  );
-
-  const getTournamentGame = useCallback(
-    (tournamentId: string) => {
-      return tournaments[tournamentId]?.game || "Game not set";
-    },
-    [tournaments]
-  );
-
-  const getTournamentPlatform = useCallback(
-    (tournamentId: string) => {
-      return tournaments[tournamentId]?.platform || "Platform not set";
-    },
-    [tournaments]
-  );
+    setLoading(false);
+  }, [router]);
 
   useEffect(() => {
-    let active = true;
-
-    async function loadReviews() {
-      await Promise.resolve();
-
-      const { data: reportData, error: reportError } = await supabase
-        .from("match_reports")
-        .select(
-          "id, match_id, tournament_id, submitted_by, player1_score, player2_score, reported_winner_id, notes, status, created_at"
-        )
-        .order("created_at", { ascending: false });
-
-      if (!active) {
-        return;
-      }
-
-      if (reportError) {
-        setMessage(reportError.message);
-        setLoading(false);
-        return;
-      }
-
-      const loadedReports = (reportData || []) as MatchReport[];
-
-      if (loadedReports.length === 0) {
-        setReports([]);
-        setMatches({});
-        setTournaments({});
-        setProfiles({});
-        setLoading(false);
-        return;
-      }
-
-      const matchIds = Array.from(
-        new Set(loadedReports.map((report) => report.match_id))
-      );
-
-      const tournamentIds = Array.from(
-        new Set(loadedReports.map((report) => report.tournament_id))
-      );
-
-      const profileIds = Array.from(
-        new Set(
-          loadedReports
-            .flatMap((report) => [
-              report.submitted_by,
-              report.reported_winner_id,
-            ])
-            .filter((id): id is string => Boolean(id))
-        )
-      );
-
-      const matchMap: Record<string, Match> = {};
-      const tournamentMap: Record<string, Tournament> = {};
-      const profileMap: Record<string, Profile> = {};
-
-      if (matchIds.length > 0) {
-        const { data: matchData, error: matchError } = await supabase
-          .from("matches")
-          .select(
-            "id, tournament_id, round, match_number, player1_id, player2_id, winner_id"
-          )
-          .in("id", matchIds);
-
-        if (!active) {
-          return;
-        }
-
-        if (matchError) {
-          setMessage(matchError.message);
-          setLoading(false);
-          return;
-        }
-
-        ((matchData || []) as Match[]).forEach((match) => {
-          matchMap[match.id] = match;
-
-          if (match.player1_id) {
-            profileIds.push(match.player1_id);
-          }
-
-          if (match.player2_id) {
-            profileIds.push(match.player2_id);
-          }
-
-          if (match.winner_id) {
-            profileIds.push(match.winner_id);
-          }
-        });
-      }
-
-      if (tournamentIds.length > 0) {
-        const { data: tournamentData, error: tournamentError } = await supabase
-          .from("tournaments")
-          .select("id, name, game, platform")
-          .in("id", tournamentIds);
-
-        if (!active) {
-          return;
-        }
-
-        if (tournamentError) {
-          setMessage(tournamentError.message);
-          setLoading(false);
-          return;
-        }
-
-        ((tournamentData || []) as Tournament[]).forEach((tournament) => {
-          tournamentMap[tournament.id] = tournament;
-        });
-      }
-
-      const uniqueProfileIds = Array.from(new Set(profileIds));
-
-      if (uniqueProfileIds.length > 0) {
-        const { data: profileData, error: profileError } = await supabase
-          .from("profiles")
-          .select("id, gamer_tag, platform, favorite_team")
-          .in("id", uniqueProfileIds);
-
-        if (!active) {
-          return;
-        }
-
-        if (profileError) {
-          setMessage(profileError.message);
-          setLoading(false);
-          return;
-        }
-
-        ((profileData || []) as Profile[]).forEach((profile) => {
-          profileMap[profile.id] = profile;
-        });
-      }
-
-      setReports(loadedReports);
-      setMatches(matchMap);
-      setTournaments(tournamentMap);
-      setProfiles(profileMap);
-      setLoading(false);
-    }
-
-    loadReviews();
+    const timeoutId = window.setTimeout(() => {
+      void loadReviews();
+    }, 0);
 
     return () => {
-      active = false;
+      window.clearTimeout(timeoutId);
     };
-  }, []);
+  }, [loadReviews]);
 
-  const totalPending = useMemo(() => {
-    return reports.filter((report) => report.status === "pending").length;
-  }, [reports]);
+  const sortedReviews = useMemo(() => {
+    return [...reviews].sort((a, b) => {
+      const aDate = a.score_submitted_at
+        ? new Date(a.score_submitted_at).getTime()
+        : 0;
+      const bDate = b.score_submitted_at
+        ? new Date(b.score_submitted_at).getTime()
+        : 0;
 
-  const totalApproved = useMemo(() => {
-    return reports.filter((report) => report.status === "approved").length;
-  }, [reports]);
-
-  const totalRejected = useMemo(() => {
-    return reports.filter((report) => report.status === "rejected").length;
-  }, [reports]);
-
-  const totalTournamentsWithReports = useMemo(() => {
-    return new Set(reports.map((report) => report.tournament_id)).size;
-  }, [reports]);
-
-  const filteredReports = useMemo(() => {
-    const normalizedSearch = searchText.trim().toLowerCase();
-
-    return reports.filter((report) => {
-      if (filter !== "all" && report.status !== filter) {
-        return false;
-      }
-
-      if (!normalizedSearch) {
-        return true;
-      }
-
-      const match = matches[report.match_id];
-      const tournamentName = getTournamentName(report.tournament_id).toLowerCase();
-      const game = getTournamentGame(report.tournament_id).toLowerCase();
-      const platform = getTournamentPlatform(report.tournament_id).toLowerCase();
-      const submittedBy = getPlayerName(report.submitted_by).toLowerCase();
-      const winnerName = getPlayerName(report.reported_winner_id).toLowerCase();
-      const player1Name = getPlayerName(match?.player1_id || null).toLowerCase();
-      const player2Name = getPlayerName(match?.player2_id || null).toLowerCase();
-
-      return (
-        tournamentName.includes(normalizedSearch) ||
-        game.includes(normalizedSearch) ||
-        platform.includes(normalizedSearch) ||
-        submittedBy.includes(normalizedSearch) ||
-        winnerName.includes(normalizedSearch) ||
-        player1Name.includes(normalizedSearch) ||
-        player2Name.includes(normalizedSearch)
-      );
+      return aDate - bDate;
     });
-  }, [
-    reports,
-    filter,
-    searchText,
-    matches,
-    getTournamentName,
-    getTournamentGame,
-    getTournamentPlatform,
-    getPlayerName,
-  ]);
+  }, [reviews]);
 
-  function isFinalMatch(match: Match, tournamentMatches: Match[]) {
-    const currentRound = match.round || 1;
+  const tournamentReviewCounts = useMemo(() => {
+    return reviews.reduce((acc, review) => {
+      acc[review.tournament_id] = (acc[review.tournament_id] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+  }, [reviews]);
 
-    const matchesInCurrentRound = tournamentMatches.filter(
-      (currentMatch) => (currentMatch.round || 1) === currentRound
-    );
+  const uniqueTournamentCount = useMemo(() => {
+    return Object.keys(tournamentReviewCounts).length;
+  }, [tournamentReviewCounts]);
 
-    return matchesInCurrentRound.length <= 1;
+  function playerName(playerId: string | null) {
+    if (!playerId) return "TBD";
+
+    return profilesById[playerId]?.gamer_tag || "Unnamed Player";
   }
 
-  async function advanceWinnerToNextRound(match: Match, winnerId: string) {
-    const { data: tournamentMatchData, error: tournamentMatchError } =
-      await supabase
-        .from("matches")
-        .select(
-          "id, tournament_id, round, match_number, player1_id, player2_id, winner_id"
-        )
-        .eq("tournament_id", match.tournament_id);
+  function tournamentName(tournamentId: string) {
+    return tournamentsById[tournamentId]?.name || "Unknown Tournament";
+  }
 
-    if (tournamentMatchError) {
-      throw new Error(tournamentMatchError.message);
-    }
+  function proofUrl(path: string) {
+    const { data } = supabase.storage.from("match-proofs").getPublicUrl(path);
 
-    const tournamentMatches = (tournamentMatchData || []) as Match[];
+    return data.publicUrl;
+  }
 
-    if (isFinalMatch(match, tournamentMatches)) {
-      return;
-    }
+  function updateWinner(matchId: string, winnerId: string) {
+    setReviewEdits((currentReviewEdits) => ({
+      ...currentReviewEdits,
+      [matchId]: {
+        ...(currentReviewEdits[matchId] || {
+          winner_id: "",
+        }),
+        winner_id: winnerId,
+      },
+    }));
+  }
 
-    const currentRound = match.round || 1;
-    const currentMatchNumber = match.match_number || 1;
-    const nextRound = currentRound + 1;
-    const nextMatchNumber = Math.ceil(currentMatchNumber / 2);
+  async function advanceWinner(match: Match, winnerId: string) {
+    const nextRound = match.round + 1;
+    const nextMatchNumber = Math.ceil(match.match_number / 2);
+    const nextSlot = match.match_number % 2 === 1 ? "player1_id" : "player2_id";
 
-    const winnerSlot =
-      currentMatchNumber % 2 === 1 ? "player1_id" : "player2_id";
-
-    const existingNextMatch = tournamentMatches.find(
+    const nextMatch = allTournamentMatches.find(
       (currentMatch) =>
-        (currentMatch.round || 1) === nextRound &&
-        (currentMatch.match_number || 1) === nextMatchNumber
+        currentMatch.tournament_id === match.tournament_id &&
+        currentMatch.round === nextRound &&
+        currentMatch.match_number === nextMatchNumber
     );
 
-    if (existingNextMatch) {
-      const { error } = await supabase
-        .from("matches")
-        .update({
-          [winnerSlot]: winnerId,
-          winner_id: null,
-        })
-        .eq("id", existingNextMatch.id);
-
-      if (error) {
-        throw new Error(error.message);
-      }
-
+    if (!nextMatch || nextMatch.status === "completed") {
       return;
     }
 
-    const nextMatch: NewMatch = {
-      tournament_id: match.tournament_id,
-      round: nextRound,
-      match_number: nextMatchNumber,
-      player1_id: winnerSlot === "player1_id" ? winnerId : null,
-      player2_id: winnerSlot === "player2_id" ? winnerId : null,
-      winner_id: null,
-    };
-
-    const { error } = await supabase.from("matches").insert(nextMatch);
+    const { error } = await supabase
+      .from("matches")
+      .update({
+        [nextSlot]: winnerId,
+      })
+      .eq("id", nextMatch.id);
 
     if (error) {
-      throw new Error(error.message);
+      setMessage(
+        `Result approved, but winner could not advance: ${error.message}`
+      );
     }
   }
 
-  async function approveReport(report: MatchReport) {
-    const match = matches[report.match_id];
+  async function approveReview(match: Match) {
+    const selectedWinnerId = reviewEdits[match.id]?.winner_id || "";
 
-    if (!match) {
-      setMessage("Match not found for this report.");
+    if (!selectedWinnerId) {
+      setMessage("Select the official winner before approving this result.");
       return;
     }
 
     if (
-      report.reported_winner_id !== match.player1_id &&
-      report.reported_winner_id !== match.player2_id
+      selectedWinnerId !== match.player1_id &&
+      selectedWinnerId !== match.player2_id
     ) {
-      setMessage("Reported winner must be one of the players in the match.");
+      setMessage("Winner must be one of the players in the match.");
       return;
     }
 
-    setReviewingReportId(report.id);
-    setMessage("");
-
-    const { error: updateMatchError } = await supabase
-      .from("matches")
-      .update({
-        winner_id: report.reported_winner_id,
-      })
-      .eq("id", report.match_id);
-
-    if (updateMatchError) {
-      setMessage(updateMatchError.message);
-      setReviewingReportId(null);
+    if (
+      match.player1_score !== null &&
+      match.player1_score !== undefined &&
+      match.player2_score !== null &&
+      match.player2_score !== undefined &&
+      match.player1_score === match.player2_score
+    ) {
+      setMessage("Scores cannot be tied when approving a winner.");
       return;
     }
 
-    const { error: approveReportError } = await supabase
-      .from("match_reports")
-      .update({
-        status: "approved",
-      })
-      .eq("id", report.id);
-
-    if (approveReportError) {
-      setMessage(approveReportError.message);
-      setReviewingReportId(null);
-      return;
-    }
-
-    const { error: rejectOtherReportsError } = await supabase
-      .from("match_reports")
-      .update({
-        status: "rejected",
-      })
-      .eq("match_id", report.match_id)
-      .neq("id", report.id)
-      .eq("status", "pending");
-
-    if (rejectOtherReportsError) {
-      setMessage(rejectOtherReportsError.message);
-      setReviewingReportId(null);
-      return;
-    }
-
-    try {
-      await advanceWinnerToNextRound(match, report.reported_winner_id);
-    } catch (advanceError) {
-      setMessage(
-        advanceError instanceof Error
-          ? advanceError.message
-          : "Report approved, but advancing the winner failed."
-      );
-      setReviewingReportId(null);
-      return;
-    }
-
-    setReports((currentReports) =>
-      currentReports.map((currentReport) => {
-        if (currentReport.id === report.id) {
-          return {
-            ...currentReport,
-            status: "approved",
-          };
-        }
-
-        if (
-          currentReport.match_id === report.match_id &&
-          currentReport.status === "pending"
-        ) {
-          return {
-            ...currentReport,
-            status: "rejected",
-          };
-        }
-
-        return currentReport;
-      })
+    const confirmed = window.confirm(
+      `Approve this score and mark ${playerName(
+        selectedWinnerId
+      )} as the winner?`
     );
 
-    setMatches((currentMatches) => ({
-      ...currentMatches,
-      [match.id]: {
-        ...match,
-        winner_id: report.reported_winner_id,
-      },
-    }));
+    if (!confirmed) return;
 
-    setMessage(
-      `Approved report. Winner saved: ${getPlayerName(
-        report.reported_winner_id
-      )}`
-    );
-    setReviewingReportId(null);
-  }
-
-  async function rejectReport(report: MatchReport) {
-    setReviewingReportId(report.id);
+    setApprovingId(match.id);
     setMessage("");
 
     const { error } = await supabase
-      .from("match_reports")
+      .from("matches")
       .update({
-        status: "rejected",
+        winner_id: selectedWinnerId,
+        status: "completed",
       })
-      .eq("id", report.id);
+      .eq("id", match.id);
 
     if (error) {
-      setMessage(error.message);
-      setReviewingReportId(null);
+      setMessage(`Error approving score: ${error.message}`);
+      setApprovingId("");
       return;
     }
 
-    setReports((currentReports) =>
-      currentReports.map((currentReport) =>
-        currentReport.id === report.id
-          ? {
-              ...currentReport,
-              status: "rejected",
-            }
-          : currentReport
-      )
-    );
+    await advanceWinner(match, selectedWinnerId);
 
-    setMessage("Report rejected.");
-    setReviewingReportId(null);
+    setMessage("Score approved successfully.");
+    await loadReviews();
+    setApprovingId("");
   }
 
-  if (loading) {
+  async function dismissReview(match: Match) {
+    const confirmed = window.confirm(
+      `Dismiss the submitted score for Round ${match.round}, Match ${match.match_number}?`
+    );
+
+    if (!confirmed) return;
+
+    setDismissingId(match.id);
+    setMessage("");
+
+    const { error } = await supabase
+      .from("matches")
+      .update({
+        player1_score: null,
+        player2_score: null,
+        score_submitted_by: null,
+        score_submitted_at: null,
+        score_proof_path: null,
+        score_proof_uploaded_by: null,
+        score_proof_uploaded_at: null,
+        status: "pending",
+      })
+      .eq("id", match.id);
+
+    if (error) {
+      setMessage(`Error dismissing score: ${error.message}`);
+      setDismissingId("");
+      return;
+    }
+
+    setMessage("Score submission dismissed.");
+    await loadReviews();
+    setDismissingId("");
+  }
+
+  if (checkingAdmin || loading) {
     return (
-      <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-        <div className="mx-auto max-w-7xl">
-          <h1 className="text-3xl font-bold">Admin Reviews</h1>
-          <p className="mt-4 text-zinc-400">Loading submitted reports...</p>
+      <main className="min-h-screen bg-black p-6 text-white">
+        <div className="mx-auto max-w-6xl">
+          <p className="rounded-xl border border-gray-800 bg-gray-950 p-6 text-gray-400">
+            {checkingAdmin ? "Checking admin access..." : "Loading reviews..."}
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <main className="min-h-screen bg-black p-6 text-white">
+        <div className="mx-auto max-w-6xl">
+          <p className="rounded-xl border border-red-900 bg-red-950/40 p-6 text-red-200">
+            You do not have admin access.
+          </p>
         </div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
+    <main className="min-h-screen bg-black p-6 text-white">
       <div className="mx-auto max-w-7xl">
-        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="mb-2 text-sm font-black uppercase tracking-widest text-red-400">
-              BattleGrid Admin
-            </p>
-
-            <h1 className="text-4xl font-black">Match Report Reviews</h1>
-
-            <p className="mt-3 text-zinc-400">
-              Approve or reject player-submitted match results.
-            </p>
-          </div>
+        <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <Link href="/admin" className="text-sm text-gray-400 hover:text-white">
+            ← Back to Admin
+          </Link>
 
           <div className="flex flex-col gap-3 sm:flex-row">
             <Link
-              href="/admin"
-              className="rounded-lg border border-zinc-700 px-4 py-2 text-center font-semibold text-white hover:bg-zinc-800"
+              href="/admin/tournaments"
+              className="text-sm text-gray-400 hover:text-white"
             >
-              Admin Dashboard
+              Bracket Manager →
             </Link>
 
             <Link
-              href="/admin/tournaments"
-              className="rounded-lg bg-red-600 px-4 py-2 text-center font-semibold text-white hover:bg-red-700"
+              href="/brackets"
+              className="text-sm text-gray-400 hover:text-white"
             >
-              Manage Winners
+              Public Brackets →
             </Link>
           </div>
         </div>
 
-        {message && (
-          <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-red-300">
-            {message}
+        <section className="mb-8 rounded-2xl border border-gray-800 bg-gray-950 p-6">
+          <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="mb-3 text-sm font-bold uppercase tracking-[0.25em] text-red-500">
+                Admin Tools
+              </p>
+
+              <h1 className="mb-3 text-4xl font-black">Score Reviews</h1>
+
+              <p className="max-w-2xl text-gray-400">
+                Review player-submitted scores, inspect proof screenshots,
+                approve official winners, or dismiss incorrect submissions.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={loadReviews}
+              disabled={loading}
+              className="rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200 disabled:opacity-50"
+            >
+              {loading ? "Refreshing..." : "Refresh Reviews"}
+            </button>
           </div>
+        </section>
+
+        {message && (
+          <p className="mb-6 rounded-lg border border-yellow-800 bg-yellow-950/30 p-4 text-sm text-yellow-200">
+            {message}
+          </p>
         )}
 
-        <section className="mb-8 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Total Reports</p>
-            <p className="mt-2 text-4xl font-black">{reports.length}</p>
+        <section className="mb-8 grid gap-4 md:grid-cols-3">
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Pending Reviews</p>
+            <p className="mt-2 text-4xl font-black">{reviews.length}</p>
           </div>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Pending</p>
-            <p className="mt-2 text-4xl font-black text-yellow-300">
-              {totalPending}
-            </p>
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">Tournaments Affected</p>
+            <p className="mt-2 text-4xl font-black">{uniqueTournamentCount}</p>
           </div>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Approved</p>
-            <p className="mt-2 text-4xl font-black text-green-300">
-              {totalApproved}
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Rejected</p>
-            <p className="mt-2 text-4xl font-black text-red-300">
-              {totalRejected}
+          <div className="rounded-xl border border-gray-800 bg-gray-950 p-5">
+            <p className="text-sm text-gray-500">With Proof</p>
+            <p className="mt-2 text-4xl font-black">
+              {reviews.filter((review) => review.score_proof_path).length}
             </p>
           </div>
         </section>
 
-        <section className="mb-8 rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-          <div className="grid gap-4 lg:grid-cols-[1fr_240px]">
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                Search Reports
-              </label>
+        {sortedReviews.length === 0 ? (
+          <section className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+            <h2 className="mb-2 text-2xl font-bold">No pending reviews</h2>
 
-              <input
-                value={searchText}
-                onChange={(event) => setSearchText(event.target.value)}
-                placeholder="Search tournament, player, game, or platform..."
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-              />
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                Report Status
-              </label>
-
-              <select
-                value={filter}
-                onChange={(event) =>
-                  setFilter(event.target.value as ReviewFilter)
-                }
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-              >
-                <option value="all">All Reports</option>
-                <option value="pending">Pending Only</option>
-                <option value="approved">Approved Only</option>
-                <option value="rejected">Rejected Only</option>
-              </select>
-            </div>
-          </div>
-
-          <p className="mt-4 text-sm text-zinc-500">
-            Tournaments with reports: {totalTournamentsWithReports}
-          </p>
-        </section>
-
-        <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-2xl font-bold">Submitted Reports</h2>
-
-              <p className="mt-2 text-sm text-zinc-400">
-                Showing {filteredReports.length} of {reports.length} reports.
-              </p>
-            </div>
+            <p className="mb-5 text-gray-400">
+              Player score submissions will appear here after they submit scores
+              from My Tournaments.
+            </p>
 
             <Link
-              href="/brackets"
-              className="rounded-lg border border-zinc-700 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-zinc-800"
+              href="/admin/tournaments"
+              className="inline-block rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200"
             >
-              View Public Brackets
+              Go to Bracket Manager
             </Link>
-          </div>
+          </section>
+        ) : (
+          <section className="grid gap-6">
+            {sortedReviews.map((match) => {
+              const tournament = tournamentsById[match.tournament_id];
+              const edit = reviewEdits[match.id] || {
+                winner_id: suggestedWinnerId(match),
+              };
 
-          {reports.length === 0 && (
-            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-8 text-center">
-              <h3 className="text-xl font-bold">No reports submitted yet</h3>
+              return (
+                <article
+                  key={match.id}
+                  className="rounded-2xl border border-gray-800 bg-gray-950 p-6"
+                >
+                  <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <p className="mb-2 text-sm font-bold uppercase tracking-[0.2em] text-red-500">
+                        {tournamentName(match.tournament_id)}
+                      </p>
 
-              <p className="mt-2 text-zinc-400">
-                Player score reports will appear here after players submit
-                match results from a tournament details page.
-              </p>
-            </div>
-          )}
+                      <h2 className="text-3xl font-black">
+                        Round {match.round}, Match {match.match_number}
+                      </h2>
 
-          {reports.length > 0 && filteredReports.length === 0 && (
-            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-8 text-center">
-              <h3 className="text-xl font-bold">No reports match your filters</h3>
+                      <p className="mt-2 text-gray-400">
+                        {tournament?.game || "Game not set"} •{" "}
+                        {tournament?.platform || "Platform not set"}
+                      </p>
 
-              <p className="mt-2 text-zinc-400">
-                Try changing the search text or status filter.
-              </p>
-            </div>
-          )}
+                      <p className="mt-2 text-sm text-gray-500">
+                        Submitted: {formatDateTime(match.score_submitted_at)}
+                      </p>
+                    </div>
 
-          {filteredReports.length > 0 && (
-            <div className="grid gap-5 lg:grid-cols-2">
-              {filteredReports.map((report) => {
-                const match = matches[report.match_id];
-
-                const player1Id = match?.player1_id || null;
-                const player2Id = match?.player2_id || null;
-
-                return (
-                  <article
-                    key={report.id}
-                    className="rounded-xl border border-zinc-800 bg-zinc-950 p-5"
-                  >
-                    <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <p className="text-sm font-bold uppercase tracking-widest text-red-400">
-                          {getTournamentName(report.tournament_id)}
-                        </p>
-
-                        <h3 className="mt-2 text-xl font-black">
-                          Round {match?.round || 1} • Match{" "}
-                          {match?.match_number || "?"}
-                        </h3>
-
-                        <p className="mt-2 text-sm text-zinc-400">
-                          {getTournamentGame(report.tournament_id)} •{" "}
-                          {getTournamentPlatform(report.tournament_id)}
-                        </p>
-                      </div>
-
-                      <span
-                        className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${
-                          report.status === "approved"
-                            ? "bg-green-500/10 text-green-300"
-                            : report.status === "rejected"
-                            ? "bg-red-500/10 text-red-300"
-                            : "bg-yellow-500/10 text-yellow-300"
-                        }`}
+                    <div className="flex flex-col gap-3 sm:flex-row">
+                      <Link
+                        href={`/brackets?tournament=${match.tournament_id}`}
+                        className="rounded-lg border border-gray-700 px-4 py-3 text-center text-sm font-bold text-white hover:bg-gray-900"
                       >
-                        {report.status}
-                      </span>
+                        View Bracket
+                      </Link>
+
+                      <Link
+                        href={`/tournaments/${match.tournament_id}`}
+                        className="rounded-lg bg-white px-4 py-3 text-center text-sm font-bold text-black hover:bg-gray-200"
+                      >
+                        Tournament
+                      </Link>
+                    </div>
+                  </div>
+
+                  <div className="mb-5 grid gap-4 md:grid-cols-3">
+                    <div
+                      className={`rounded-xl border p-4 ${
+                        edit.winner_id === match.player1_id
+                          ? "border-green-700 bg-green-950/30"
+                          : "border-gray-800 bg-black"
+                      }`}
+                    >
+                      <p className="text-xs text-gray-500">Player 1</p>
+
+                      <p className="mt-1 text-xl font-bold">
+                        {match.player1_id ? (
+                          <Link
+                            href={`/players/${match.player1_id}`}
+                            className="hover:text-red-400"
+                          >
+                            {playerName(match.player1_id)}
+                          </Link>
+                        ) : (
+                          "TBD"
+                        )}
+                      </p>
+
+                      <p className="mt-2 text-3xl font-black">
+                        {match.player1_score ?? "-"}
+                      </p>
+                    </div>
+
+                    <div
+                      className={`rounded-xl border p-4 ${
+                        edit.winner_id === match.player2_id
+                          ? "border-green-700 bg-green-950/30"
+                          : "border-gray-800 bg-black"
+                      }`}
+                    >
+                      <p className="text-xs text-gray-500">Player 2</p>
+
+                      <p className="mt-1 text-xl font-bold">
+                        {match.player2_id ? (
+                          <Link
+                            href={`/players/${match.player2_id}`}
+                            className="hover:text-red-400"
+                          >
+                            {playerName(match.player2_id)}
+                          </Link>
+                        ) : (
+                          "TBD"
+                        )}
+                      </p>
+
+                      <p className="mt-2 text-3xl font-black">
+                        {match.player2_score ?? "-"}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl border border-gray-800 bg-black p-4">
+                      <p className="text-xs text-gray-500">Submitted By</p>
+
+                      <p className="mt-1 text-xl font-bold">
+                        {match.score_submitted_by ? (
+                          <Link
+                            href={`/players/${match.score_submitted_by}`}
+                            className="hover:text-red-400"
+                          >
+                            {playerName(match.score_submitted_by)}
+                          </Link>
+                        ) : (
+                          "Unknown"
+                        )}
+                      </p>
+
+                      <p className="mt-2 text-sm text-gray-400">
+                        Score: {scoreText(match)}
+                      </p>
+                    </div>
+                  </div>
+
+                  {match.score_proof_path ? (
+                    <div className="mb-5 overflow-hidden rounded-xl border border-gray-800 bg-black">
+                      <Image
+                        src={proofUrl(match.score_proof_path)}
+                        alt="Submitted score proof screenshot"
+                        width={1200}
+                        height={700}
+                        className="h-auto w-full object-cover"
+                      />
+                    </div>
+                  ) : (
+                    <p className="mb-5 rounded-xl border border-yellow-800 bg-yellow-950/20 p-4 text-sm text-yellow-200">
+                      No proof screenshot was uploaded with this submission.
+                    </p>
+                  )}
+
+                  <section className="rounded-xl border border-red-900 bg-red-950/10 p-4">
+                    <h3 className="mb-4 text-xl font-bold text-red-200">
+                      Review Decision
+                    </h3>
+
+                    <div className="mb-4">
+                      <label className="mb-2 block text-sm text-gray-400">
+                        Official Winner
+                      </label>
+
+                      <select
+                        className="w-full rounded-lg border border-gray-700 bg-black px-4 py-3 text-white"
+                        value={edit.winner_id}
+                        onChange={(event) =>
+                          updateWinner(match.id, event.target.value)
+                        }
+                      >
+                        <option value="">Select official winner</option>
+
+                        {match.player1_id && (
+                          <option value={match.player1_id}>
+                            {playerName(match.player1_id)}
+                          </option>
+                        )}
+
+                        {match.player2_id && (
+                          <option value={match.player2_id}>
+                            {playerName(match.player2_id)}
+                          </option>
+                        )}
+                      </select>
                     </div>
 
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <div
-                        className={`rounded-lg border p-4 ${
-                          report.reported_winner_id === player1Id
-                            ? "border-green-500/40 bg-green-500/10"
-                            : "border-zinc-800 bg-zinc-900"
-                        }`}
-                      >
-                        <p className="font-bold">{getPlayerName(player1Id)}</p>
-                        <p className="mt-1 text-sm text-zinc-500">
-                          {getPlayerPlatform(player1Id)}
-                        </p>
-                        <p className="mt-3 text-3xl font-black">
-                          {report.player1_score}
-                        </p>
-                      </div>
-
-                      <div
-                        className={`rounded-lg border p-4 ${
-                          report.reported_winner_id === player2Id
-                            ? "border-green-500/40 bg-green-500/10"
-                            : "border-zinc-800 bg-zinc-900"
-                        }`}
-                      >
-                        <p className="font-bold">{getPlayerName(player2Id)}</p>
-                        <p className="mt-1 text-sm text-zinc-500">
-                          {getPlayerPlatform(player2Id)}
-                        </p>
-                        <p className="mt-3 text-3xl font-black">
-                          {report.player2_score}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-                        <p className="text-sm text-zinc-500">Reported Winner</p>
-                        <p className="mt-1 font-bold text-green-300">
-                          {getPlayerName(report.reported_winner_id)}
-                        </p>
-                      </div>
-
-                      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-                        <p className="text-sm text-zinc-500">Submitted By</p>
-                        <p className="mt-1 font-bold">
-                          {getPlayerName(report.submitted_by)}
-                        </p>
-                      </div>
-                    </div>
-
-                    {report.notes && (
-                      <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-                        <p className="text-sm text-zinc-500">Notes</p>
-                        <p className="mt-1 text-sm text-zinc-300">
-                          {report.notes}
-                        </p>
-                      </div>
-                    )}
-
-                    {match?.winner_id && (
-                      <div className="mt-5 rounded-lg border border-green-500/40 bg-green-500/10 p-4">
-                        <p className="text-sm text-green-200">Current Saved Winner</p>
-                        <p className="mt-1 font-bold text-green-300">
-                          {getPlayerName(match.winner_id)}
-                        </p>
-                      </div>
-                    )}
-
-                    <div className="mt-5 flex flex-col gap-3 sm:flex-row">
                       <button
-                        onClick={() => approveReport(report)}
-                        disabled={
-                          reviewingReportId === report.id ||
-                          report.status !== "pending"
-                        }
-                        className="rounded-lg bg-green-600 px-4 py-3 text-sm font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        type="button"
+                        onClick={() => approveReview(match)}
+                        disabled={approvingId === match.id}
+                        className="rounded-lg bg-white px-5 py-3 font-bold text-black hover:bg-gray-200 disabled:opacity-50"
                       >
-                        {reviewingReportId === report.id
+                        {approvingId === match.id
                           ? "Approving..."
-                          : "Approve Report"}
+                          : "Approve Result"}
                       </button>
 
                       <button
-                        onClick={() => rejectReport(report)}
-                        disabled={
-                          reviewingReportId === report.id ||
-                          report.status !== "pending"
-                        }
-                        className="rounded-lg bg-red-600 px-4 py-3 text-sm font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        type="button"
+                        onClick={() => dismissReview(match)}
+                        disabled={dismissingId === match.id}
+                        className="rounded-lg border border-red-800 px-5 py-3 font-bold text-red-300 hover:bg-red-950/40 disabled:opacity-50"
                       >
-                        {reviewingReportId === report.id
-                          ? "Rejecting..."
-                          : "Reject Report"}
+                        {dismissingId === match.id
+                          ? "Dismissing..."
+                          : "Dismiss Submission"}
                       </button>
-
-                      <Link
-                        href="/admin/tournaments"
-                        className="rounded-lg border border-zinc-700 px-4 py-3 text-center text-sm font-bold text-white hover:bg-zinc-800"
-                      >
-                        Manage Bracket
-                      </Link>
                     </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
+                  </section>
+                </article>
+              );
+            })}
+          </section>
+        )}
       </div>
     </main>
   );

@@ -1,7 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Navbar from "./components/Navbar";
+import Footer from "./components/Footer";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,9 +15,39 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BattleGrid | Gaming Tournaments",
+  title: {
+    default: "BattleGrid | Gaming Tournaments",
+    template: "%s | BattleGrid",
+  },
   description:
-    "BattleGrid is a gaming tournament platform for Madden and competitive players.",
+    "BattleGrid is a competitive gaming tournament hub for hosting events, joining brackets, submitting scores, tracking records, and climbing leaderboards.",
+  keywords: [
+    "BattleGrid",
+    "gaming tournaments",
+    "Madden tournaments",
+    "esports",
+    "brackets",
+    "leaderboard",
+    "score tracking",
+  ],
+  authors: [
+    {
+      name: "BattleGrid",
+    },
+  ],
+  creator: "BattleGrid",
+  openGraph: {
+    title: "BattleGrid | Gaming Tournaments",
+    description:
+      "Join tournaments, track brackets, submit scores, and climb the BattleGrid leaderboard.",
+    siteName: "BattleGrid",
+    type: "website",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#000000",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({
@@ -27,10 +58,13 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} bg-zinc-950 text-white antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} min-h-screen bg-black text-white antialiased`}
       >
         <Navbar />
-        {children}
+
+        <div>{children}</div>
+
+        <Footer />
       </body>
     </html>
   );

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 
 type Tournament = {
@@ -9,75 +9,102 @@ type Tournament = {
   name: string;
   game: string | null;
   platform: string | null;
-  prize_pool: number | null;
-  entry_fee: number | null;
-  max_players: number | null;
+  prize_pool: number | string | null;
+  entry_fee: number | string | null;
+  max_players: number | string | null;
   created_at: string | null;
 };
 
-type TournamentForm = {
-  name: string;
-  game: string;
-  platform: string;
-  prizePool: string;
-  entryFee: string;
-  maxPlayers: string;
-};
+function toNumber(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
-type TournamentPlayerRow = {
-  tournament_id: string;
-};
+function formatDate(value: string | null): string {
+  if (!value) return "Recently";
 
-type MatchRow = {
-  tournament_id: string;
-};
+  const date = new Date(value);
 
-const defaultForm: TournamentForm = {
-  name: "",
-  game: "Madden NFL",
-  platform: "Xbox Series X|S",
-  prizePool: "",
-  entryFee: "",
-  maxPlayers: "8",
-};
+  if (Number.isNaN(date.getTime())) return "Recently";
 
-const gameOptions = [
-  "Madden NFL",
-  "NBA 2K",
-  "EA Sports College Football",
-  "Call of Duty",
-  "Fortnite",
-  "Rocket League",
-  "UFC",
-  "Other",
-];
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
 
-const platformOptions = [
-  "Xbox Series X|S",
-  "PlayStation 5",
-  "PC",
-  "Xbox One",
-  "PlayStation 4",
-  "Nintendo Switch",
-  "Mobile",
-  "Cross Platform",
-];
+function formatMoney(value: number | string | null): string {
+  const amount = Number(value ?? 0);
 
-export default function AdminDashboardPage() {
+  if (!Number.isFinite(amount) || amount <= 0) return "Free";
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(amount);
+}
+
+export default function AdminPage() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [checkingAdmin, setCheckingAdmin] = useState(true);
+
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
-  const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
-  const [matchCounts, setMatchCounts] = useState<Record<string, number>>({});
-  const [form, setForm] = useState<TournamentForm>(defaultForm);
-
-  const [loading, setLoading] = useState(true);
+  const [loadingTournaments, setLoadingTournaments] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [message, setMessage] = useState("");
+
+  const [name, setName] = useState("");
+  const [game, setGame] = useState("");
+  const [platform, setPlatform] = useState("");
+  const [prizePool, setPrizePool] = useState("");
+  const [entryFee, setEntryFee] = useState("");
+  const [maxPlayers, setMaxPlayers] = useState("");
+
+  const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    let active = true;
+    let isMounted = true;
 
-    async function loadAdminData() {
-      await Promise.resolve();
+    async function checkAdminAndLoad() {
+      const { data: userData } = await supabase.auth.getUser();
+      const userId = userData.user?.id ?? null;
+
+      if (!userId) {
+        if (!isMounted) return;
+
+        setIsAdmin(false);
+        setCheckingAdmin(false);
+        setMessage("Please log in with an admin account.");
+        return;
+      }
+
+      const { data: profileData, error: profileError } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (!isMounted) return;
+
+      if (profileError) {
+        setIsAdmin(false);
+        setCheckingAdmin(false);
+        setMessage(profileError.message);
+        return;
+      }
+
+      const userIsAdmin = profileData?.role === "admin";
+
+      setIsAdmin(userIsAdmin);
+      setCheckingAdmin(false);
+
+      if (!userIsAdmin) {
+        setMessage("You do not have admin access.");
+        return;
+      }
+
+      setLoadingTournaments(true);
 
       const { data: tournamentData, error: tournamentError } = await supabase
         .from("tournaments")
@@ -86,176 +113,71 @@ export default function AdminDashboardPage() {
         )
         .order("created_at", { ascending: false });
 
-      if (!active) {
-        return;
-      }
+      if (!isMounted) return;
 
       if (tournamentError) {
         setMessage(tournamentError.message);
-        setLoading(false);
-        return;
-      }
-
-      const loadedTournaments = (tournamentData || []) as Tournament[];
-      const tournamentIds = loadedTournaments.map((tournament) => tournament.id);
-
-      if (tournamentIds.length === 0) {
         setTournaments([]);
-        setPlayerCounts({});
-        setMatchCounts({});
-        setLoading(false);
-        return;
+      } else {
+        setMessage(null);
+        setTournaments((tournamentData ?? []) as Tournament[]);
       }
 
-      const { data: playerData, error: playerError } = await supabase
-        .from("tournament_players")
-        .select("tournament_id")
-        .in("tournament_id", tournamentIds);
-
-      if (!active) {
-        return;
-      }
-
-      if (playerError) {
-        setMessage(playerError.message);
-        setLoading(false);
-        return;
-      }
-
-      const playerCountMap: Record<string, number> = {};
-
-      ((playerData || []) as TournamentPlayerRow[]).forEach((row) => {
-        playerCountMap[row.tournament_id] =
-          (playerCountMap[row.tournament_id] || 0) + 1;
-      });
-
-      const { data: matchData, error: matchError } = await supabase
-        .from("matches")
-        .select("tournament_id")
-        .in("tournament_id", tournamentIds);
-
-      if (!active) {
-        return;
-      }
-
-      if (matchError) {
-        setMessage(matchError.message);
-        setLoading(false);
-        return;
-      }
-
-      const matchCountMap: Record<string, number> = {};
-
-      ((matchData || []) as MatchRow[]).forEach((row) => {
-        matchCountMap[row.tournament_id] =
-          (matchCountMap[row.tournament_id] || 0) + 1;
-      });
-
-      setTournaments(loadedTournaments);
-      setPlayerCounts(playerCountMap);
-      setMatchCounts(matchCountMap);
-      setLoading(false);
+      setLoadingTournaments(false);
     }
 
-    loadAdminData();
+    void checkAdminAndLoad();
 
     return () => {
-      active = false;
+      isMounted = false;
     };
   }, []);
 
-  const totalPlayers = useMemo(() => {
-    return Object.values(playerCounts).reduce((total, count) => total + count, 0);
-  }, [playerCounts]);
+  async function refreshTournaments() {
+    setLoadingTournaments(true);
+    setMessage(null);
 
-  const totalMatches = useMemo(() => {
-    return Object.values(matchCounts).reduce((total, count) => total + count, 0);
-  }, [matchCounts]);
+    const { data, error } = await supabase
+      .from("tournaments")
+      .select(
+        "id, name, game, platform, prize_pool, entry_fee, max_players, created_at"
+      )
+      .order("created_at", { ascending: false });
 
-  const activeBrackets = useMemo(() => {
-    return Object.values(matchCounts).filter((count) => count > 0).length;
-  }, [matchCounts]);
+    if (error) {
+      setMessage(error.message);
+      setTournaments([]);
+    } else {
+      setTournaments((data ?? []) as Tournament[]);
+    }
 
-  function updateForm(field: keyof TournamentForm, value: string) {
-    setForm((currentForm) => ({
-      ...currentForm,
-      [field]: value,
-    }));
+    setLoadingTournaments(false);
   }
 
-  function parseOptionalNumber(value: string) {
-    const trimmedValue = value.trim();
+  async function createTournament(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
 
-    if (!trimmedValue) {
-      return null;
+    if (!isAdmin) {
+      setMessage("You do not have admin access.");
+      return;
     }
 
-    const numberValue = Number(trimmedValue);
-
-    if (Number.isNaN(numberValue)) {
-      return null;
-    }
-
-    return numberValue;
-  }
-
-  function formatMoney(value: number | null) {
-    if (value === null) {
-      return "Not set";
-    }
-
-    if (value === 0) {
-      return "Free";
-    }
-
-    return `$${value}`;
-  }
-
-  function formatDate(value: string | null) {
-    if (!value) {
-      return "Date not available";
-    }
-
-    return new Date(value).toLocaleDateString();
-  }
-
-  async function createTournament() {
-    if (!form.name.trim()) {
+    if (!name.trim()) {
       setMessage("Tournament name is required.");
       return;
     }
 
-    if (!form.game.trim()) {
-      setMessage("Game is required.");
-      return;
-    }
-
-    if (!form.platform.trim()) {
-      setMessage("Platform is required.");
-      return;
-    }
-
     setCreating(true);
-    setMessage("");
+    setMessage(null);
 
-    const prizePool = parseOptionalNumber(form.prizePool);
-    const entryFee = parseOptionalNumber(form.entryFee);
-    const maxPlayers = parseOptionalNumber(form.maxPlayers);
-
-    const { data, error } = await supabase
-      .from("tournaments")
-      .insert({
-        name: form.name.trim(),
-        game: form.game.trim(),
-        platform: form.platform.trim(),
-        prize_pool: prizePool,
-        entry_fee: entryFee,
-        max_players: maxPlayers,
-      })
-      .select(
-        "id, name, game, platform, prize_pool, entry_fee, max_players, created_at"
-      )
-      .single();
+    const { error } = await supabase.from("tournaments").insert({
+      name: name.trim(),
+      game: game.trim() || null,
+      platform: platform.trim() || null,
+      prize_pool: toNumber(prizePool),
+      entry_fee: toNumber(entryFee),
+      max_players: toNumber(maxPlayers),
+    });
 
     if (error) {
       setMessage(error.message);
@@ -263,341 +185,242 @@ export default function AdminDashboardPage() {
       return;
     }
 
-    const newTournament = data as Tournament;
+    setName("");
+    setGame("");
+    setPlatform("");
+    setPrizePool("");
+    setEntryFee("");
+    setMaxPlayers("");
 
-    setTournaments((currentTournaments) => [
-      newTournament,
-      ...currentTournaments,
-    ]);
+    await refreshTournaments();
 
-    setPlayerCounts((currentCounts) => ({
-      ...currentCounts,
-      [newTournament.id]: 0,
-    }));
-
-    setMatchCounts((currentCounts) => ({
-      ...currentCounts,
-      [newTournament.id]: 0,
-    }));
-
-    setForm(defaultForm);
-    setMessage("Tournament created successfully.");
+    setMessage("Tournament created.");
     setCreating(false);
   }
 
-  if (loading) {
+  if (checkingAdmin) {
     return (
-      <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-        <div className="mx-auto max-w-7xl">
-          <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-          <p className="mt-4 text-zinc-400">Loading admin dashboard...</p>
-        </div>
+      <main className="min-h-screen bg-slate-950 px-6 py-10 text-white">
+        <section className="mx-auto max-w-4xl rounded-3xl border border-white/10 bg-white/5 p-8 text-center">
+          <p className="text-slate-300">Checking admin access...</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <main className="min-h-screen bg-slate-950 px-6 py-10 text-white">
+        <section className="mx-auto max-w-4xl rounded-3xl border border-red-500/30 bg-red-500/10 p-8 text-center">
+          <h1 className="text-3xl font-black">Admin Access Required</h1>
+
+          <p className="mt-3 text-red-200">
+            {message || "You do not have permission to view this page."}
+          </p>
+
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
+            <Link
+              href="/login"
+              className="rounded-xl bg-red-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-red-500"
+            >
+              Log In
+            </Link>
+
+            <Link
+              href="/tournaments"
+              className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold text-white transition hover:bg-white/10"
+            >
+              Back to Tournaments
+            </Link>
+          </div>
+        </section>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-      <div className="mx-auto max-w-7xl">
-        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <main className="min-h-screen bg-slate-950 px-6 py-10 text-white">
+      <section className="mx-auto max-w-6xl">
+        <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
-            <p className="mb-2 text-sm font-black uppercase tracking-widest text-red-400">
-              BattleGrid Admin
+            <p className="mb-2 text-sm font-bold uppercase tracking-[0.35em] text-red-400">
+              Admin
             </p>
 
-            <h1 className="text-4xl font-black">Admin Dashboard</h1>
+            <h1 className="text-4xl font-black tracking-tight md:text-5xl">
+              Create Tournament
+            </h1>
 
-            <p className="mt-3 text-zinc-400">
-              Create tournaments, review platform stats, and manage brackets.
+            <p className="mt-3 max-w-2xl text-slate-300">
+              Create tournaments, manage event details, and send them to the
+              public tournament list.
             </p>
           </div>
 
-          <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="flex flex-wrap gap-3">
             <Link
               href="/admin/tournaments"
-              className="rounded-lg bg-red-600 px-4 py-2 text-center font-semibold text-white hover:bg-red-700"
+              className="rounded-xl bg-red-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-red-500"
             >
               Manage Brackets
             </Link>
 
-            <Link
-              href="/tournaments"
-              className="rounded-lg border border-zinc-700 px-4 py-2 text-center font-semibold text-white hover:bg-zinc-800"
+            <button
+              type="button"
+              onClick={refreshTournaments}
+              className="rounded-xl border border-red-500/50 bg-red-500/10 px-5 py-3 text-sm font-bold text-red-200 transition hover:bg-red-500/20"
             >
-              Public Tournaments
-            </Link>
+              Refresh
+            </button>
           </div>
         </div>
 
-        {message && (
-          <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-red-300">
+        {message ? (
+          <div className="mb-6 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm font-bold text-red-200">
             {message}
           </div>
-        )}
+        ) : null}
 
-        <section className="mb-8 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Total Tournaments</p>
-            <p className="mt-2 text-4xl font-black">{tournaments.length}</p>
+        <form
+          onSubmit={createTournament}
+          className="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl shadow-black/20"
+        >
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="block">
+              <span className="text-sm font-bold text-slate-300">
+                Tournament Name
+              </span>
+
+              <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="Friday Night Madden Showdown"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-white outline-none transition focus:border-red-500"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-bold text-slate-300">Game</span>
+
+              <input
+                value={game}
+                onChange={(event) => setGame(event.target.value)}
+                placeholder="Madden 26"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-white outline-none transition focus:border-red-500"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-bold text-slate-300">
+                Platform
+              </span>
+
+              <input
+                value={platform}
+                onChange={(event) => setPlatform(event.target.value)}
+                placeholder="PS5 / Xbox / Both"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-white outline-none transition focus:border-red-500"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-bold text-slate-300">
+                Prize Pool
+              </span>
+
+              <input
+                type="number"
+                min="0"
+                value={prizePool}
+                onChange={(event) => setPrizePool(event.target.value)}
+                placeholder="100"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-white outline-none transition focus:border-red-500"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-bold text-slate-300">
+                Entry Fee
+              </span>
+
+              <input
+                type="number"
+                min="0"
+                value={entryFee}
+                onChange={(event) => setEntryFee(event.target.value)}
+                placeholder="10"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-white outline-none transition focus:border-red-500"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-bold text-slate-300">
+                Max Players
+              </span>
+
+              <input
+                type="number"
+                min="2"
+                value={maxPlayers}
+                onChange={(event) => setMaxPlayers(event.target.value)}
+                placeholder="8"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-white outline-none transition focus:border-red-500"
+              />
+            </label>
           </div>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Joined Players</p>
-            <p className="mt-2 text-4xl font-black">{totalPlayers}</p>
-          </div>
+          <button
+            type="submit"
+            disabled={creating}
+            className="mt-6 rounded-xl bg-red-600 px-6 py-3 text-sm font-black text-white transition hover:bg-red-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          >
+            {creating ? "Creating..." : "Create Tournament"}
+          </button>
+        </form>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Generated Matches</p>
-            <p className="mt-2 text-4xl font-black">{totalMatches}</p>
-          </div>
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-6">
+          <h2 className="text-2xl font-black">Latest Tournaments</h2>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <p className="text-sm text-zinc-500">Active Brackets</p>
-            <p className="mt-2 text-4xl font-black">{activeBrackets}</p>
-          </div>
-        </section>
-
-        <div className="grid gap-8 xl:grid-cols-[0.9fr_1.1fr]">
-          <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <h2 className="text-2xl font-bold">Create Tournament</h2>
-
-            <p className="mt-2 text-sm text-zinc-400">
-              Add a new event for players to join.
-            </p>
-
-            <div className="mt-6 space-y-5">
-              <div>
-                <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                  Tournament Name
-                </label>
-
-                <input
-                  value={form.name}
-                  onChange={(event) => updateForm("name", event.target.value)}
-                  placeholder="Example: Friday Night Madden Showdown"
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                  Game
-                </label>
-
-                <select
-                  value={form.game}
-                  onChange={(event) => updateForm("game", event.target.value)}
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
+          {loadingTournaments ? (
+            <p className="mt-4 text-slate-300">Loading tournaments...</p>
+          ) : tournaments.length === 0 ? (
+            <p className="mt-4 text-slate-300">No tournaments created yet.</p>
+          ) : (
+            <div className="mt-5 grid gap-4">
+              {tournaments.map((tournament) => (
+                <article
+                  key={tournament.id}
+                  className="rounded-2xl border border-white/10 bg-slate-950/60 p-5"
                 >
-                  {gameOptions.map((game) => (
-                    <option key={game} value={game}>
-                      {game}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <h3 className="text-xl font-black">{tournament.name}</h3>
 
-              <div>
-                <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                  Platform
-                </label>
-
-                <select
-                  value={form.platform}
-                  onChange={(event) =>
-                    updateForm("platform", event.target.value)
-                  }
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-                >
-                  {platformOptions.map((platform) => (
-                    <option key={platform} value={platform}>
-                      {platform}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid gap-5 sm:grid-cols-3">
-                <div>
-                  <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                    Prize Pool
-                  </label>
-
-                  <input
-                    value={form.prizePool}
-                    onChange={(event) =>
-                      updateForm("prizePool", event.target.value)
-                    }
-                    placeholder="100"
-                    inputMode="numeric"
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                    Entry Fee
-                  </label>
-
-                  <input
-                    value={form.entryFee}
-                    onChange={(event) =>
-                      updateForm("entryFee", event.target.value)
-                    }
-                    placeholder="0"
-                    inputMode="numeric"
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm font-semibold text-zinc-300">
-                    Max Players
-                  </label>
-
-                  <input
-                    value={form.maxPlayers}
-                    onChange={(event) =>
-                      updateForm("maxPlayers", event.target.value)
-                    }
-                    placeholder="8"
-                    inputMode="numeric"
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-red-500"
-                  />
-                </div>
-              </div>
-
-              <button
-                onClick={createTournament}
-                disabled={creating}
-                className="w-full rounded-lg bg-red-600 px-5 py-3 font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {creating ? "Creating..." : "Create Tournament"}
-              </button>
-            </div>
-          </section>
-
-          <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="text-2xl font-bold">Latest Tournaments</h2>
-
-                <p className="mt-2 text-sm text-zinc-400">
-                  Recently created events and their current status.
-                </p>
-              </div>
-
-              <Link
-                href="/admin/tournaments"
-                className="rounded-lg border border-zinc-700 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-zinc-800"
-              >
-                Manage All
-              </Link>
-            </div>
-
-            {tournaments.length === 0 && (
-              <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-6 text-center text-zinc-400">
-                No tournaments created yet.
-              </div>
-            )}
-
-            {tournaments.length > 0 && (
-              <div className="space-y-4">
-                {tournaments.slice(0, 6).map((tournament) => {
-                  const joinedPlayers = playerCounts[tournament.id] || 0;
-                  const totalMatches = matchCounts[tournament.id] || 0;
-                  const maxPlayers = tournament.max_players;
-
-                  const isFull =
-                    maxPlayers !== null &&
-                    maxPlayers !== undefined &&
-                    joinedPlayers >= maxPlayers;
-
-                  return (
-                    <article
-                      key={tournament.id}
-                      className="rounded-xl border border-zinc-800 bg-zinc-950 p-5"
-                    >
-                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div>
-                          <div className="flex flex-wrap items-center gap-3">
-                            <h3 className="text-xl font-bold">
-                              {tournament.name}
-                            </h3>
-
-                            <span
-                              className={`rounded-full px-3 py-1 text-xs font-bold ${
-                                isFull
-                                  ? "bg-red-500/10 text-red-300"
-                                  : "bg-green-500/10 text-green-300"
-                              }`}
-                            >
-                              {isFull ? "Full" : "Open"}
-                            </span>
-                          </div>
-
-                          <p className="mt-2 text-sm text-zinc-400">
-                            {tournament.game || "Game not set"} •{" "}
-                            {tournament.platform || "Platform not set"} • Created{" "}
-                            {formatDate(tournament.created_at)}
-                          </p>
-
-                          <div className="mt-4 grid gap-3 text-sm sm:grid-cols-4">
-                            <div className="rounded-lg bg-zinc-900 p-3">
-                              <p className="text-zinc-500">Prize</p>
-                              <p className="mt-1 font-semibold">
-                                {formatMoney(tournament.prize_pool)}
-                              </p>
-                            </div>
-
-                            <div className="rounded-lg bg-zinc-900 p-3">
-                              <p className="text-zinc-500">Entry</p>
-                              <p className="mt-1 font-semibold">
-                                {formatMoney(tournament.entry_fee)}
-                              </p>
-                            </div>
-
-                            <div className="rounded-lg bg-zinc-900 p-3">
-                              <p className="text-zinc-500">Players</p>
-                              <p className="mt-1 font-semibold">
-                                {joinedPlayers}
-                                {maxPlayers ? ` / ${maxPlayers}` : ""}
-                              </p>
-                            </div>
-
-                            <div className="rounded-lg bg-zinc-900 p-3">
-                              <p className="text-zinc-500">Matches</p>
-                              <p className="mt-1 font-semibold">
-                                {totalMatches}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex flex-col gap-3 lg:min-w-44">
-                          <Link
-                            href={`/tournaments/${tournament.id}`}
-                            className="rounded-lg bg-red-600 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-red-700"
-                          >
-                            View Details
-                          </Link>
-
-                          <Link
-                            href="/admin/tournaments"
-                            className="rounded-lg border border-zinc-700 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-zinc-800"
-                          >
-                            Manage Bracket
-                          </Link>
-                        </div>
+                      <div className="mt-2 flex flex-wrap gap-3 text-sm text-slate-300">
+                        <span>{tournament.game || "Game not listed"}</span>
+                        <span>{tournament.platform || "Platform not listed"}</span>
+                        <span>Prize: {formatMoney(tournament.prize_pool)}</span>
+                        <span>Entry: {formatMoney(tournament.entry_fee)}</span>
+                        <span>
+                          Max Players: {tournament.max_players || "No limit"}
+                        </span>
+                        <span>{formatDate(tournament.created_at)}</span>
                       </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
+                    </div>
+
+                    <Link
+                      href={`/tournaments/${tournament.id}`}
+                      className="w-fit rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-black text-white transition hover:bg-white/10"
+                    >
+                      View
+                    </Link>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
         </div>
-      </div>
+      </section>
     </main>
   );
 }
