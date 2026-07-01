@@ -67,6 +67,10 @@ const adminLinks = [
     label: "Admin Dashboard",
   },
   {
+    href: "/admin/reports",
+    label: "Reports",
+  },
+  {
     href: "/admin/tournaments",
     label: "Manage Tournaments",
   },

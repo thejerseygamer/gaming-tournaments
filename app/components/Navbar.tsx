@@ -35,6 +35,11 @@ const mainLinks: NavLink[] = [
     label: "Help",
   },
   {
+    href: "/support",
+    label: "Support",
+    authOnly: true,
+  },
+  {
     href: "/my-tournaments",
     label: "My Tournaments",
     authOnly: true,
@@ -228,7 +233,7 @@ export default function Navbar() {
           </div>
         </Link>
 
-        <div className="hidden items-center gap-2 xl:flex">
+        <div className="hidden items-center gap-2 2xl:flex">
           {visibleLinks.map((link) => (
             <Link
               key={link.href}
@@ -263,7 +268,7 @@ export default function Navbar() {
           )}
         </div>
 
-        <div className="hidden items-center gap-3 xl:flex">
+        <div className="hidden items-center gap-3 2xl:flex">
           {loadingUser ? (
             <span className="text-sm text-gray-500">Loading...</span>
           ) : isLoggedIn ? (
@@ -305,14 +310,14 @@ export default function Navbar() {
         <button
           type="button"
           onClick={() => setMenuOpen((currentValue) => !currentValue)}
-          className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-bold text-white hover:bg-gray-900 xl:hidden"
+          className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-bold text-white hover:bg-gray-900 2xl:hidden"
         >
           {menuOpen ? "Close" : "Menu"}
         </button>
       </nav>
 
       {menuOpen && (
-        <section className="border-t border-gray-800 bg-black px-6 py-4 xl:hidden">
+        <section className="border-t border-gray-800 bg-black px-6 py-4 2xl:hidden">
           <div className="mx-auto grid max-w-7xl gap-2">
             {visibleLinks.map((link) => (
               <Link
